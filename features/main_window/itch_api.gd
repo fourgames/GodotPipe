@@ -1,10 +1,11 @@
 extends Node
 ## itch.io's server-side API for the signed-in account: who the API key
-## belongs to (name and avatar) and which games it can upload to.
+## belongs to (name and avatar), which games it can upload to and their covers.
 ##
 ## The key goes in an Authorization header, never in a URL, so it cannot end
 ## up in a log line or a proxy's access log. Avatars are cached on disk
-## (user://itch_assets/profiles/<user id>.img).
+## (user://itch_assets/profiles/<user id>.img), and so are game covers
+## (user://itch_assets/covers/<game id>.img).
 ##
 ## Knows nothing about the UI: call [method fetch_profile] / [method fetch_games]
 ## and listen for the signals. Every answer carries the serial of the request
@@ -15,16 +16,22 @@ extends Node
 signal profile_ready(serial: int, user: Dictionary, texture: Texture2D)
 ## [param unauthorized] is true when itch.io rejected the key itself.
 signal profile_failed(serial: int, reason: String, unauthorized: bool)
-## [param games] is an Array of { title, target, url, published }.
+## [param games] is an Array of { id, title, target, url, published, cover_url }.
 signal games_ready(serial: int, games: Array)
 signal games_failed(serial: int, reason: String)
+## The cover of the game [param target] (user/game) is ready.
+signal cover_ready(target: String, texture: Texture2D)
+signal cover_failed(target: String, reason: String)
 
 const PROFILE_URL := "https://api.itch.io/profile"
 const GAMES_URL := "https://api.itch.io/profile/games"
 const CACHE_DIR := "user://itch_assets/profiles"
+const COVER_CACHE_DIR := "user://itch_assets/covers"
 
 var _profile_http: HTTPRequest
 var _games_http: HTTPRequest
+var _cover_http: HTTPRequest
+var _cover_game := {}  # the game whose cover _cover_http is downloading
 var _serial := 0
 var _profile_serial := -1
 var _games_serial := -1
@@ -35,6 +42,7 @@ var _stage := ""  # "profile" | "avatar"
 func _ready() -> void:
 	_profile_http = _make_http(_on_profile_completed)
 	_games_http = _make_http(_on_games_completed)
+	_cover_http = _make_http(_on_cover_completed)
 
 
 func _make_http(handler: Callable) -> HTTPRequest:
@@ -173,14 +181,72 @@ func _on_games_completed(result: int, code: int, _headers_in: PackedStringArray,
 			var target := ButlerTool.target_from_url(url)
 			if target.is_empty():
 				continue
+			# An animated cover comes with a still frame; Godot cannot load GIFs.
+			var cover: Variant = g.get("still_cover_url")
+			if not cover is String:
+				cover = g.get("cover_url")
 			games.append({
 				"title": str(g.get("title", target)),
 				"target": target,
 				"url": url,
 				"published": g.get("published", false) == true,
+				"id": str(g.get("id", "")),
+				"cover_url": cover if cover is String else "",
 			})
 	games.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return str(a["title"]).naturalnocasecmp_to(b["title"]) < 0)
 	games_ready.emit(serial, games)
+
+
+static func cover_cache_path(game_id: String) -> String:
+	return COVER_CACHE_DIR.path_join(game_id + ".img")
+
+
+## Shows the cover of [param game] (an entry of [signal games_ready]) from the
+## cache, or downloads it when there is none or [param force] is set. Only the
+## latest request is answered.
+func fetch_cover(game: Dictionary, force: bool) -> void:
+	if _cover_http.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		_cover_http.cancel_request()
+	_cover_game = {}
+	var target := str(game.get("target", ""))
+	var game_id := str(game.get("id", ""))
+	var url := str(game.get("cover_url", ""))
+	if not force and not game_id.is_empty() and FileAccess.file_exists(cover_cache_path(game_id)):
+		var cached := _decode(FileAccess.get_file_as_bytes(cover_cache_path(game_id)))
+		if cached != null:
+			cover_ready.emit.call_deferred(target, ImageTexture.create_from_image(cached))
+			return
+	if url.is_empty() or game_id.is_empty():
+		cover_failed.emit.call_deferred(target, "the game has no cover image on itch.io")
+		return
+	_cover_game = game
+	if _cover_http.request(url) != OK:
+		_cover_game = {}
+		cover_failed.emit.call_deferred(target, "request failed")
+
+
+func _on_cover_completed(result: int, code: int, _headers_in: PackedStringArray, body: PackedByteArray) -> void:
+	var game := _cover_game
+	_cover_game = {}
+	if game.is_empty():
+		return
+	var target := str(game["target"])
+	if result != HTTPRequest.RESULT_SUCCESS:
+		cover_failed.emit(target, KnownIssues.http_result_text(result))
+		return
+	if code != 200:
+		cover_failed.emit(target, "itch.io answered HTTP %d" % code)
+		return
+	var img := _decode(body)
+	if img == null:
+		cover_failed.emit(target, "the cover image could not be read")
+		return
+	DirAccess.make_dir_recursive_absolute(COVER_CACHE_DIR)
+	var f := FileAccess.open(cover_cache_path(str(game["id"])), FileAccess.WRITE)
+	if f != null:
+		f.store_buffer(body)
+		f.close()
+	cover_ready.emit(target, ImageTexture.create_from_image(img))
 
 
 ## { "data": Dictionary } for a good JSON answer, or { "error": String,

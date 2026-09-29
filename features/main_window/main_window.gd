@@ -381,6 +381,10 @@ var _itch_user_id := ""
 ## Serials of the ItchApi requests whose answers are still wanted.
 var _itch_profile_serial := -1
 var _itch_games_serial := -1
+## True once the account's games list arrived (it may be empty).
+var _itch_games_loaded := false
+## The next games list forces a fresh cover download (the Refresh button).
+var _itch_cover_force := false
 ## Games of the signed-in account from the last fetch ({ title, target, … }).
 var _itch_games: Array = []
 
@@ -452,6 +456,12 @@ func _ready() -> void:
 	%SteamTargetToggle.toggled.connect(_on_target_toggled.bind("steam"))
 	%ItchTargetToggle.toggled.connect(_on_target_toggled.bind("itch"))
 	%ItchPageButton.pressed.connect(_on_itch_page_pressed)
+	%RefreshItchButton.pressed.connect(_refresh_itch_game.bind(true))
+	%ItchApi.cover_ready.connect(_on_itch_cover_ready)
+	%ItchApi.cover_failed.connect(_on_itch_cover_failed)
+	%ItchGameCard.resized.connect(_on_itch_card_resized)
+	%ItchCoverImage.resized.connect(func() -> void:
+		(%ItchCoverImage.material as ShaderMaterial).set_shader_parameter("size", %ItchCoverImage.size))
 	%PickItchGameButton.about_to_popup.connect(_on_pick_itch_game_opening)
 	%PickItchGameButton.get_popup().id_pressed.connect(_on_itch_game_picked)
 	%InstallationGeneralButton.pressed.connect(_on_installation_general_pressed)
@@ -486,7 +496,7 @@ func _ready() -> void:
 	%ItchTarget.text_changed.connect(func(t: String) -> void:
 		_commit_field("itch_target", t.strip_edges())
 		_set_field_error(%ItchTarget, false)
-		_refresh_itch_page_link()
+		_refresh_itch_game(false)
 	)
 	# A pasted game page address becomes user/game once the field is left.
 	%ItchTarget.focus_exited.connect(_normalize_itch_target)
@@ -1402,7 +1412,7 @@ func _status_messages() -> Array[Dictionary]:
 		all.append(_run_status)
 	all.append_array(_target_status)
 	if not _steam_on(p) and not _itch_on(p):
-		all.append({ "text": "Pick where this app publishes: switch on Steam, itch.io or both under Publish to.", "color": COLOR_WARN })
+		all.append({ "text": "Pick where this app publishes: tick Steam, itch.io or both in their section headers.", "color": COLOR_WARN })
 	if not folder and not _has_presets():
 		all.append({ "text": "No export presets found. Open the project in Godot → Project → Export… and add a preset, then reselect the project.", "color": COLOR_WARN })
 	var dupes := _duplicate_depot_ids() if _steam_on(p) else PackedStringArray()
@@ -1576,7 +1586,7 @@ func _validate_publish_form() -> bool:
 	_depot_errors.clear()
 	var ok := _validate_common(p)
 	if not steam and not itch:
-		log_line("Switch on Steam, itch.io or both under Publish to, so the build has somewhere to go.", COLOR_ERR)
+		log_line("Tick Steam, itch.io or both in their section headers, so the build has somewhere to go.", COLOR_ERR)
 		ok = false
 
 	var space_left := _free_disk_bytes()
@@ -2513,16 +2523,23 @@ func _row_kind(p: Dictionary, d: Dictionary) -> String:
 	return _platform_kind(_preset_names.find(str(d.get("preset", ""))))
 
 
-## Shows the sections, table columns and composer hint for the targets of
-## [param p], and the state of the two Publish to toggles.
+## Shows the section bodies, table columns and composer hint for the targets
+## of [param p], and the state of the checkboxes in the store headers. A store
+## that is off keeps its header, so it can be ticked again.
 func _apply_targets(p: Dictionary) -> void:
 	var steam := _steam_on(p)
 	var itch := _itch_on(p)
 	%SteamTargetToggle.set_pressed_no_signal(steam)
 	%ItchTargetToggle.set_pressed_no_signal(itch)
 	_refresh_target_toggles()
-	%SteamSection.visible = steam
-	%ItchSection.visible = itch
+	%SteamBody.visible = steam
+	%SteamOffHint.visible = not steam
+	%RefreshHeaderButton.visible = steam
+	%ItchBody.visible = itch
+	%ItchOffHint.visible = not itch
+	%RefreshItchButton.visible = itch
+	if itch:
+		_refresh_itch_game(false)
 	%FetchDepotsButton.visible = steam
 	%InstallationGeneralButton.visible = steam  # Steamworks launch option link
 	%ColDepotRow.visible = steam
@@ -2556,7 +2573,7 @@ func _refresh_target_toggles() -> void:
 			toggle.remove_theme_stylebox_override("disabled")
 			toggle.remove_theme_color_override("icon_disabled_color")
 			toggle.modulate.a = 1.0
-		toggle.get_parent().tooltip_text = ("Publish this app to %s" % pair[2]) if set_up or toggle.button_pressed else pair[3]
+		toggle.tooltip_text = ("Publish this app to %s" % pair[2]) if set_up or toggle.button_pressed else pair[3]
 
 
 func _on_target_toggled(on: bool, target: String) -> void:
@@ -2600,11 +2617,105 @@ func _row_folder_name(p: Dictionary, d: Dictionary) -> String:
 	return dir.get_file() if not dir.is_empty() else str(p["name"])
 
 
+## The Page row: the link button, and whether the game is a draft when it is
+## one of the account's games.
 func _refresh_itch_page_link() -> void:
 	var target: String = %ItchTarget.text.strip_edges()
 	var valid := ButlerTool.is_valid_target(target)
 	%ItchPageButton.disabled = not valid
 	%ItchPageButton.tooltip_text = "Open %s" % ButlerTool.page_url(target) if valid else "Enter the game as user/game first"
+	if target.is_empty():
+		%ItchPageStatus.text = "Enter the game first"
+	elif not valid:
+		%ItchPageStatus.text = "Not a user/game yet"
+	else:
+		var address := ButlerTool.page_url(target).trim_prefix("https://")
+		var game := _current_itch_game()
+		%ItchPageStatus.text = address if game.is_empty() \
+			else "%s · %s" % ["Published" if game["published"] else "Draft", address]
+
+
+## The account's game the Game field names, or {} when it is not one of them
+## (or the list has not loaded).
+func _current_itch_game() -> Dictionary:
+	var target: String = %ItchTarget.text.strip_edges().to_lower()
+	for g: Dictionary in _itch_games:
+		if str(g["target"]).to_lower() == target:
+			return g
+	return {}
+
+
+# ---------------------------------------------------------------------------
+# itch.io cover
+# ---------------------------------------------------------------------------
+
+## itch.io covers are 315x250 (2x: 630x500). Like the Steam capsule, the frame
+## sits left of the card, matches the card's height and keeps the aspect.
+const ITCH_COVER_ASPECT := 315.0 / 250.0
+
+
+func _on_itch_card_resized() -> void:
+	var height: float = maxf(%ItchGameCard.size.y, %ItchGameCard.get_combined_minimum_size().y)
+	if height <= 0.0:
+		return
+	var wanted := Vector2(roundf(height * ITCH_COVER_ASPECT), height)
+	if not %ItchCoverFrame.custom_minimum_size.is_equal_approx(wanted):
+		%ItchCoverFrame.custom_minimum_size = wanted
+
+
+## Shows the cover and page status of the selected app's game. The account's
+## games list is loaded first when it is not there yet; [param force] (the
+## Refresh button) reloads the list and downloads the cover again.
+func _refresh_itch_game(force: bool) -> void:
+	_on_itch_card_resized()
+	_refresh_itch_page_link()
+	if force:
+		_itch_games_loaded = false
+		_itch_cover_force = true
+	if not _itch_games_loaded:
+		if _itch_ok():
+			_itch_games_serial = %ItchApi.fetch_games(%ItchApiKey.text)
+		else:
+			_show_itch_cover_placeholder("Sign in to itch.io to show the cover")
+		return
+	var game := _current_itch_game()
+	if game.is_empty():
+		_show_itch_cover_placeholder("No itch.io cover found")
+		return
+	if %ItchCoverImage.get_meta("target", "") != game["target"]:
+		_show_itch_cover_placeholder("Loading cover…")
+	elif not _itch_cover_force:
+		return  # This game's cover is already on screen.
+	%ItchApi.fetch_cover(game, _itch_cover_force)
+	_itch_cover_force = false
+
+
+func _show_itch_cover_placeholder(text: String) -> void:
+	%ItchCoverImage.texture = null
+	%ItchCoverImage.visible = false
+	%ItchCoverImage.set_meta("target", "")
+	%ItchCoverPlaceholderLabel.text = text
+	%ItchCoverPlaceholder.visible = true
+
+
+func _on_itch_cover_ready(target: String, texture: Texture2D) -> void:
+	if target.to_lower() != %ItchTarget.text.strip_edges().to_lower():
+		return  # Late answer for another game or app.
+	var fresh: bool = not %ItchCoverImage.visible or %ItchCoverImage.get_meta("target", "") != target
+	%ItchCoverImage.texture = texture
+	%ItchCoverImage.set_meta("target", target)
+	%ItchCoverImage.visible = true
+	%ItchCoverPlaceholder.visible = false
+	if fresh:
+		Motion.fade_in(%ItchCoverImage)
+
+
+func _on_itch_cover_failed(target: String, reason: String) -> void:
+	if target.to_lower() != %ItchTarget.text.strip_edges().to_lower():
+		return
+	if %ItchCoverImage.texture == null:
+		_show_itch_cover_placeholder("No itch.io cover found")
+	log_line("itch.io cover for %s unavailable: %s" % [target, reason], COLOR_WARN)
 
 
 func _on_itch_page_pressed() -> void:
@@ -2623,7 +2734,7 @@ func _normalize_itch_target() -> void:
 		return
 	%ItchTarget.text = target
 	_commit_field("itch_target", target)
-	_refresh_itch_page_link()
+	_refresh_itch_game(false)
 
 
 ## The game list fills when it opens, from the account's games on itch.io.
@@ -2650,23 +2761,31 @@ func _fill_itch_game_menu() -> void:
 		popup.add_item("No games on this account yet. Create one on itch.io first.")
 		popup.set_item_disabled(0, true)
 		return
+	var current := _current_itch_game()
 	for i in _itch_games.size():
 		var g: Dictionary = _itch_games[i]
-		popup.add_item("%s  (%s)%s" % [g["title"], g["target"], "" if g["published"] else " · draft"], i)
+		popup.add_radio_check_item("%s  (%s)%s" % [g["title"], g["target"], "" if g["published"] else " · draft"], i)
+		popup.set_item_checked(i, g == current)
 
 
 func _on_itch_games_ready(serial: int, games: Array) -> void:
 	if serial != _itch_games_serial:
 		return
 	_itch_games = games
+	_itch_games_loaded = true
 	if %PickItchGameButton.get_popup().visible:
 		_fill_itch_game_menu()
+	if _selected_index >= 0 and _itch_on(_projects[_selected_index]):
+		_refresh_itch_game(false)
 
 
 func _on_itch_games_failed(serial: int, reason: String) -> void:
 	if serial != _itch_games_serial:
 		return
 	log_line("Could not load your itch.io games (%s). Type the game as user/game instead." % reason, COLOR_WARN)
+	_itch_cover_force = false
+	if %ItchCoverImage.texture == null:
+		_show_itch_cover_placeholder("No itch.io cover found")
 	var popup: PopupMenu = %PickItchGameButton.get_popup()
 	if popup.visible:
 		popup.clear()
@@ -2681,7 +2800,7 @@ func _on_itch_game_picked(id: int) -> void:
 	%ItchTarget.text = target
 	_commit_field("itch_target", target)
 	_set_field_error(%ItchTarget, false)
-	_refresh_itch_page_link()
+	_refresh_itch_game(false)
 	log_line("%s publishes to %s on itch.io." % [_projects[_selected_index]["name"], ButlerTool.page_url(target)], COLOR_INFO)
 
 
@@ -4956,6 +5075,7 @@ func _on_itch_key_changed(_text: String) -> void:
 		_itch_verified = false
 		_itch_profile_serial = -1
 		_itch_games.clear()
+		_itch_games_loaded = false
 		%ItchStatusLabel.text = "Press Sign in to check the new key"
 		_save_settings()
 	_refresh_setup_state()
@@ -4993,6 +5113,8 @@ func _on_itch_profile_ready(serial: int, user: Dictionary, texture: Texture2D) -
 		log_line("Signed in to itch.io as %s." % _itch_user, COLOR_OK)
 	%ItchSignInButton.disabled = _is_busy
 	_refresh_setup_state()
+	if fresh and _selected_index >= 0 and _itch_on(_projects[_selected_index]):
+		_refresh_itch_game(false)
 
 
 func _on_itch_profile_failed(serial: int, reason: String, unauthorized: bool) -> void:
@@ -5026,6 +5148,7 @@ func _on_itch_sign_out_pressed() -> void:
 	_itch_display = ""
 	_itch_user_id = ""
 	_itch_games.clear()
+	_itch_games_loaded = false
 	_itch_profile_serial = -1
 	%ItchApiKey.text = ""
 	%ItchAvatarImage.texture = null

@@ -14,6 +14,7 @@ used under the MIT license:
 | `close.svg` | `Close.svg` |
 | `distraction_free.svg` | `DistractionFree.svg` |
 | `external_link.svg` | `ExternalLink.svg` |
+| `file_list.svg` | `FileList.svg` |
 | `folder.svg` | `Folder.svg` |
 | `gui_tree_arrow_down.svg` | `GuiTreeArrowDown.svg` |
 | `gui_tree_arrow_right.svg` | `GuiTreeArrowRight.svg` |

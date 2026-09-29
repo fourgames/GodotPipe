@@ -7,6 +7,7 @@
 [ext_resource type="Texture2D" uid="uid://b2qo1wsn5r6hs" path="res://public/icons/editor/visibility_hidden.svg" id="5_eye_closed"]
 [ext_resource type="Script" uid="uid://c0ts8n8mbd0fa" path="res://features/main_window/steam_profile.gd" id="6_steam_profile"]
 [ext_resource type="Script" path="res://features/main_window/itch_api.gd" id="26_itch_api"]
+[ext_resource type="Texture2D" path="res://public/icons/editor/file_list.svg" id="27_file_list"]
 [ext_resource type="Texture2D" uid="uid://d1tw60veou2x4" path="res://public/icons/editor/add.svg" id="8_add"]
 [ext_resource type="Script" uid="uid://odyitkek5kp8" path="res://features/main_window/discord_widget.gd" id="8_discord_widget"]
 [ext_resource type="Texture2D" uid="uid://cbg4o60wa3pfp" path="res://public/icons/editor/script.svg" id="10_script"]
@@ -35,6 +36,11 @@ shader_parameter/size = Vector2(26, 26)
 shader = ExtResource("4_rounded")
 shader_parameter/radius = 10.0
 shader_parameter/size = Vector2(100, 150)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_itch_cover"]
+shader = ExtResource("4_rounded")
+shader_parameter/radius = 10.0
+shader_parameter/size = Vector2(121, 96)
 
 [sub_resource type="Gradient" id="Gradient_fade"]
 colors = PackedColorArray(0.08235, 0.08235, 0.08235, 1, 0.08235, 0.08235, 0.08235, 0)
@@ -1146,67 +1152,6 @@ layout_mode = 2
 size_flags_vertical = 3
 theme_override_constants/separation = 22
 
-[node name="TargetsSection" type="VBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings"]
-layout_mode = 2
-theme_override_constants/separation = 8
-
-[node name="TargetsHeader" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection"]
-layout_mode = 2
-
-[node name="TargetsLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsHeader"]
-layout_mode = 2
-size_flags_horizontal = 3
-theme_type_variation = &"SectionLabel"
-text = "Publish to"
-
-[node name="TargetsCard" type="PanelContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection"]
-layout_mode = 2
-theme_type_variation = &"Card"
-
-[node name="TargetsRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard"]
-layout_mode = 2
-theme_override_constants/separation = 24
-
-[node name="ItchTargetRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard/TargetsRow"]
-layout_mode = 2
-tooltip_text = "Publish this app to itch.io"
-theme_override_constants/separation = 6
-
-[node name="ItchTargetToggle" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard/TargetsRow/ItchTargetRow"]
-unique_name_in_owner = true
-custom_minimum_size = Vector2(18, 18)
-layout_mode = 2
-size_flags_vertical = 4
-theme_type_variation = &"CheckToggle"
-toggle_mode = true
-icon = ExtResource("18_check")
-icon_alignment = 1
-
-[node name="ItchTargetLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard/TargetsRow/ItchTargetRow"]
-layout_mode = 2
-theme_type_variation = &"FieldLabel"
-text = "itch.io"
-
-[node name="SteamTargetRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard/TargetsRow"]
-layout_mode = 2
-tooltip_text = "Publish this app to Steam"
-theme_override_constants/separation = 6
-
-[node name="SteamTargetToggle" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard/TargetsRow/SteamTargetRow"]
-unique_name_in_owner = true
-custom_minimum_size = Vector2(18, 18)
-layout_mode = 2
-size_flags_vertical = 4
-theme_type_variation = &"CheckToggle"
-toggle_mode = true
-icon = ExtResource("18_check")
-icon_alignment = 1
-
-[node name="SteamTargetLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/TargetsSection/TargetsCard/TargetsRow/SteamTargetRow"]
-layout_mode = 2
-theme_type_variation = &"FieldLabel"
-text = "Steam"
-
 [node name="GodotSection" type="VBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings" unique_id=777687875]
 unique_name_in_owner = true
 layout_mode = 2
@@ -1307,6 +1252,18 @@ theme_override_constants/separation = 8
 
 [node name="SteamHeaderRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/SteamSection" unique_id=480048813]
 layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="SteamTargetToggle" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/SteamSection/SteamHeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(18, 18)
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Publish this app to Steam"
+theme_type_variation = &"CheckToggle"
+toggle_mode = true
+icon = ExtResource("18_check")
+icon_alignment = 1
 
 [node name="SteamSectionLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/SteamSection/SteamHeaderRow" unique_id=1745620767]
 layout_mode = 2
@@ -1324,6 +1281,7 @@ text = "Refresh"
 icon = ExtResource("16_reload")
 
 [node name="SteamBody" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/SteamSection" unique_id=1159434317]
+unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/separation = 16
 
@@ -1440,6 +1398,14 @@ size_flags_horizontal = 3
 tooltip_text = "Steamworks beta branch to set this build live on after upload (e.g. beta). The default branch can't be set live from here; leave empty and set it live in Steamworks yourself."
 placeholder_text = "beta"
 
+[node name="SteamOffHint" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/SteamSection"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_type_variation = &"Caption"
+text = "Off for this app. Tick the box to publish it to Steam too."
+autowrap_mode = 3
+
 [node name="ItchSection" type="VBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings"]
 unique_name_in_owner = true
 layout_mode = 2
@@ -1447,6 +1413,18 @@ theme_override_constants/separation = 8
 
 [node name="ItchSectionHeader" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection"]
 layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ItchTargetToggle" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchSectionHeader"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(18, 18)
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Publish this app to itch.io"
+theme_type_variation = &"CheckToggle"
+toggle_mode = true
+icon = ExtResource("18_check")
+icon_alignment = 1
 
 [node name="ItchGameSectionLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchSectionHeader"]
 layout_mode = 2
@@ -1454,63 +1432,147 @@ size_flags_horizontal = 3
 theme_type_variation = &"SectionLabel"
 text = "itch.io"
 
-[node name="ItchPageButton" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchSectionHeader"]
+[node name="RefreshItchButton" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchSectionHeader"]
 unique_name_in_owner = true
 layout_mode = 2
-tooltip_text = "Enter the game as user/game first"
+tooltip_text = "Reload your games and the cover from itch.io"
 theme_type_variation = &"FlatButton"
-disabled = true
-text = "Open page"
-icon = ExtResource("17_external_link")
+text = "Refresh"
+icon = ExtResource("16_reload")
 
-[node name="ItchGameCard" type="PanelContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection"]
+[node name="ItchBody" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection"]
+unique_name_in_owner = true
 layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="ItchCoverFrame" type="Control" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(121, 96)
+clip_contents = true
+layout_mode = 2
+
+[node name="ItchCoverImage" type="TextureRect" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchCoverFrame"]
+unique_name_in_owner = true
+visible = false
+texture_filter = 2
+material = SubResource("ShaderMaterial_itch_cover")
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+expand_mode = 1
+stretch_mode = 6
+
+[node name="ItchCoverPlaceholder" type="PanelContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchCoverFrame"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_type_variation = &"CapsulePlaceholder"
+
+[node name="ItchCoverPlaceholderLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchCoverFrame/ItchCoverPlaceholder"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+theme_type_variation = &"Muted"
+text = "No itch.io cover found"
+horizontal_alignment = 1
+vertical_alignment = 1
+autowrap_mode = 3
+clip_text = true
+text_overrun_behavior = 3
+
+[node name="ItchGameCard" type="PanelContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 0
 theme_type_variation = &"Card"
 
-[node name="ItchGameRows" type="VBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard"]
+[node name="ItchGameRows" type="VBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard"]
 layout_mode = 2
 theme_override_constants/separation = 10
 
-[node name="ItchTargetRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows"]
+[node name="ItchTargetRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows"]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="ItchTargetLabelRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows/ItchTargetRow"]
+[node name="ItchTargetLabelRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchTargetRow"]
 custom_minimum_size = Vector2(160, 0)
 layout_mode = 2
 theme_override_constants/separation = 3
 
-[node name="ItchTargetLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows/ItchTargetRow/ItchTargetLabelRow"]
+[node name="ItchTargetLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchTargetRow/ItchTargetLabelRow"]
 layout_mode = 2
 theme_type_variation = &"FieldLabel"
 text = "Game"
 
-[node name="Star" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows/ItchTargetRow/ItchTargetLabelRow"]
+[node name="Star" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchTargetRow/ItchTargetLabelRow"]
 layout_mode = 2
 theme_type_variation = &"RequiredMark"
 text = "*"
 
-[node name="ItchTarget" type="LineEdit" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows/ItchTargetRow"]
+[node name="ItchTarget" type="LineEdit" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchTargetRow"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 tooltip_text = "The itch.io game as user/game: for https://you.itch.io/my-game that is you/my-game. Pasting the page address works too. Create the game on itch.io first (it can stay a draft)."
 placeholder_text = "you/my-game"
 
-[node name="PickItchGameButton" type="MenuButton" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows/ItchTargetRow"]
+[node name="PickItchGameButton" type="MenuButton" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchTargetRow"]
 unique_name_in_owner = true
+custom_minimum_size = Vector2(24, 24)
 layout_mode = 2
 size_flags_vertical = 4
 tooltip_text = "Pick one of your itch.io games"
-theme_type_variation = &"FlatButton"
-text = "My games"
-icon = ExtResource("15_arrow_down")
+theme_type_variation = &"IconButton"
+icon = ExtResource("27_file_list")
+icon_alignment = 1
 flat = false
 
-[node name="ItchChannelsHint" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchGameCard/ItchGameRows"]
+[node name="ItchPageRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ItchPageLabelRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchPageRow"]
+custom_minimum_size = Vector2(160, 0)
+layout_mode = 2
+theme_override_constants/separation = 3
+
+[node name="ItchPageLabel" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchPageRow/ItchPageLabelRow"]
+layout_mode = 2
+theme_type_variation = &"FieldLabel"
+text = "Page"
+
+[node name="ItchPageButton" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchPageRow/ItchPageLabelRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Enter the game as user/game first"
+theme_type_variation = &"IconButton"
+disabled = true
+icon = ExtResource("17_external_link")
+icon_alignment = 1
+
+[node name="ItchPageStatus" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection/ItchBody/ItchGameCard/ItchGameRows/ItchPageRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"Muted"
+text = "Enter the game first"
+text_overrun_behavior = 3
+
+[node name="ItchOffHint" type="Label" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings/ItchSection"]
+unique_name_in_owner = true
+visible = false
 layout_mode = 2
 theme_type_variation = &"Caption"
-text = "Each build row below is pushed to its own channel. Channel names with windows, mac or linux get that platform on itch.io."
+text = "Off for this app. Tick the box to publish it to itch.io too."
 autowrap_mode = 3
 
 [node name="DepotsSection" type="VBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/ProjectSettings" unique_id=1391297409]
