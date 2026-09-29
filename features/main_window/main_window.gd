@@ -2546,6 +2546,16 @@ func _refresh_target_toggles() -> void:
 		var set_up: bool = pair[1]
 		var locked := not _publishing.is_empty() and _is_selected(_publishing)
 		toggle.disabled = locked or (not set_up and not toggle.button_pressed)
+		# Button has no "disabled + pressed" look: the disabled style hides the
+		# check, so a toggle locked during a run would read as switched off.
+		if toggle.disabled and toggle.button_pressed:
+			toggle.add_theme_stylebox_override("disabled", toggle.get_theme_stylebox("pressed"))
+			toggle.add_theme_color_override("icon_disabled_color", toggle.get_theme_color("icon_pressed_color"))
+			toggle.modulate.a = 0.6
+		else:
+			toggle.remove_theme_stylebox_override("disabled")
+			toggle.remove_theme_color_override("icon_disabled_color")
+			toggle.modulate.a = 1.0
 		toggle.get_parent().tooltip_text = ("Publish this app to %s" % pair[2]) if set_up or toggle.button_pressed else pair[3]
 
 
