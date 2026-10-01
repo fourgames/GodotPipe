@@ -8,6 +8,18 @@ extends Control
 ## and then uploads to each enabled target in turn: Steam (SteamCMD), then
 ## itch.io (butler). Child processes stream their output into the console
 ## line by line.
+##
+## Started with arguments after "--" it runs headless as a command-line tool
+## instead (see features/cli/cli.gd), driving the same pipeline.
+
+## Every console message as plain text, for the command-line mode: [param kind]
+## is "line", "banner", "step", "step_done", "cmd", "out" or "exit", and
+## [param color] the COLOR_* level of the message.
+signal console_emitted(kind: String, text: String, color: String)
+## One line of a child's output, before the console shows or folds it.
+signal child_output(line: String, is_stderr: bool, tool: String)
+## The console's live progress bar moved to [param pct] percent.
+signal progress_changed(label: String, pct: int)
 
 const PROJECTS_FILE := "user://projects.cfg"
 const SETTINGS_FILE := "user://settings.cfg"
@@ -139,6 +151,9 @@ var _console_dragging := false  # true while the user drags the console scrollba
 
 const Motion := preload("res://features/main_window/ui_motion.gd")
 const ConsoleProgress := preload("res://features/main_window/console_progress.gd")
+## Command-line mode (preloaded by path: a class_name only resolves after the
+## editor rescanned the project).
+const Cli := preload("res://features/cli/cli.gd")
 ## Live progress bar in the console: one line (label, bar, percentage)
 ## rewritten in place. _bar_para is its paragraph while it is live, else -1.
 const BAR_CELLS := 20
@@ -388,11 +403,24 @@ var _itch_cover_force := false
 ## Games of the signed-in account from the last fetch ({ title, target, … }).
 var _itch_games: Array = []
 
+## True when started with command-line arguments (see Cli): no window state,
+## nothing written to the settings files, no lookups that only feed the UI,
+## and a sign-in or Steam Guard prompt stops the run instead of waiting.
+var cli_mode := false
+## Set in cli_mode when a run stopped because Steam or itch.io needs a sign-in
+## (password, Steam Guard code, approval in the mobile app) the CLI cannot give.
+var auth_needed := false
+## Set when the running child is stopped on purpose after a set time (the
+## exported build's smoke test), so its end is not reported as a failure.
+var _child_timed_out := false
+
 
 func _ready() -> void:
-	get_tree().auto_accept_quit = false  # Quitting mid-publish asks first.
-	_apply_display_scale()
-	_apply_macos_titlebar()
+	cli_mode = not OS.get_cmdline_user_args().is_empty()
+	get_tree().auto_accept_quit = cli_mode  # Quitting mid-publish asks first.
+	if not cli_mode:
+		_apply_display_scale()
+		_apply_macos_titlebar()
 	get_viewport().size_changed.connect(_on_window_resized)
 	%ContentMargin.minimum_size_changed.connect(_on_window_resized)
 	%ComposerMargin.minimum_size_changed.connect(_on_window_resized)
@@ -591,6 +619,12 @@ func _ready() -> void:
 	_show_project(-1)
 	_check_shared_secret()
 	_refresh_setup_state()
+	if cli_mode:
+		var cli := Cli.new()
+		cli.name = "Cli"
+		add_child(cli)
+		cli.run.call_deferred(self, OS.get_cmdline_user_args())
+		return
 	_restore_window_state()
 	%BuildPublishButton.tooltip_text = "%s (%s)" % [BUILD_TOOLTIP, _shortcut_label("Enter")]
 	# Checkbox-style toggles whose "Remember" label is a separate node.
@@ -1278,7 +1312,8 @@ func _show_project(index: int) -> void:
 	if not has_project:
 		%HeaderDebounce.stop()
 		_refresh_setup_state()
-		_refresh_discord(false)
+		if not cli_mode:
+			_refresh_discord(false)
 		return
 
 	var p := _projects[index]
@@ -1313,7 +1348,9 @@ func _show_project(index: int) -> void:
 		_check_godot_version()
 
 	log_line("Selected app: %s" % p["name"], COLOR_INFO)
-	if _steam_on(p):
+	# The command line uses the app as configured: no store lookups that fill
+	# in the App ID or depots, and no capsule download.
+	if _steam_on(p) and not cli_mode:
 		_refresh_steam_header(false)
 		_suggest_app_id(p)
 		_maybe_auto_fetch_depots(_current_app_id())
@@ -1524,6 +1561,7 @@ func _validate_login_fields() -> bool:
 	var username: String = %SteamUsername.text.strip_edges()
 	if username.is_empty():
 		log_line("Enter a Steam username.", COLOR_ERR)
+		auth_needed = auth_needed or cli_mode
 		_set_field_error(%SteamUsername, true)
 		%SteamUsername.grab_focus()
 		ok = false
@@ -1537,7 +1575,7 @@ func _validate_login_fields() -> bool:
 		ok = false
 	if not _validate_steamcmd_field():
 		ok = false
-	if not ok and not %SetupPage.visible:
+	if not ok and not %SetupPage.visible and not cli_mode:
 		_show_project(-1)  # Put the red-marked fields on screen.
 	return ok
 
@@ -1553,12 +1591,14 @@ func _validate_itch_setup() -> bool:
 	if %ItchApiKey.text.strip_edges().is_empty():
 		log_line("Paste your itch.io API key on the Setup page (itch.io → Settings → API keys) and press Sign in.", COLOR_ERR)
 		_set_field_error(%ItchApiKey, true)
+		auth_needed = auth_needed or cli_mode
 		ok = false
 	elif not _itch_ok():
 		log_line("The itch.io API key is not checked yet. Press Sign in on the itch.io card of the Setup page.", COLOR_ERR)
 		_set_field_error(%ItchApiKey, true)
+		auth_needed = auth_needed or cli_mode
 		ok = false
-	if not ok and not %SetupPage.visible:
+	if not ok and not %SetupPage.visible and not cli_mode:
 		_show_project(-1)  # Put the red-marked fields on screen.
 	return ok
 
@@ -1571,7 +1611,7 @@ func _validate_steamcmd_field() -> bool:
 		log_line("SteamCMD not found. Use Download SteamCMD or Find, or the folder button next to the path.", COLOR_ERR)
 		_set_field_error(%SteamCmdBinary, true)
 		ok = false
-	if not ok and not %SetupPage.visible:
+	if not ok and not %SetupPage.visible and not cli_mode:
 		_show_project(-1)  # Put the red-marked fields on screen.
 	return ok
 
@@ -3472,15 +3512,38 @@ func _on_build_publish_pressed() -> void:
 		return
 	if _selected_index < 0:
 		return
+	await build_and_publish()
+
+
+## Build & Publish of the app on screen, shared by the button and the command
+## line (see Cli). [param options]:
+## - "mode": "publish" (the button), "check" (the checks and the store
+##   checks, nothing exported) or "dry_run" (also exports, nothing uploaded).
+## - "smoke_seconds": when above 0, every export this machine can run is
+##   started headless for that long and its script errors are collected
+##   (see [method _smoke_test_rows]). "strict" then stops before the upload
+##   when one of them failed.
+## - "all_or_nothing": a store that fails its check stops the whole run
+##   instead of letting the other store go on.
+## Returns the run's ctx (see [method _make_publish_ctx]) with "stage" set
+## to where it ended: "done", "invalid", "preflight", "export", "smoke",
+## "upload" or "cancelled"; {"stage": "invalid"} when the form check failed.
+func build_and_publish(options := {}) -> Dictionary:
+	var mode: String = options.get("mode", "publish")
 	if not _validate_publish_form():
-		return
+		return {"stage": "invalid"}
 	var p := _projects[_selected_index]
 	# Read everything that belongs to the page on screen now: the user may look
 	# at another app while this one builds, which reloads _preset_names.
 	var ctx := _make_publish_ctx(p)
-	# The description works like a chat box: it is sent with this build and the
-	# field clears right away. It is put back if the run fails or is cancelled.
-	_set_description("")
+	ctx["mode"] = mode
+	ctx["smoke_seconds"] = float(options.get("smoke_seconds", 0.0))
+	ctx["strict"] = bool(options.get("strict", false))
+	ctx["stage"] = "preflight"
+	if mode == "publish":
+		# The description works like a chat box: it is sent with this build and the
+		# field clears right away. It is put back if the run fails or is cancelled.
+		_set_description("")
 	if not _run_status.is_empty() or not _target_status.is_empty():
 		_run_status = {}  # The last run's fix no longer applies to this one.
 		_target_status.clear()
@@ -3495,36 +3558,81 @@ func _on_build_publish_pressed() -> void:
 		where.append("Steam (App %s)" % str(p["app_id"]).strip_edges())
 	if ctx["itch"]:
 		where.append("itch.io (%s)" % ctx["target"])
-	log_banner(("Publish %s to %s" if ctx["folder"] else "Build and publish %s to %s") % [p["name"], " and ".join(where)])
+	match mode:
+		"check":
+			log_banner("Check %s for %s" % [p["name"], " and ".join(where)])
+		"dry_run":
+			log_banner("%s %s for %s (dry run: nothing is uploaded)" % ["Check" if ctx["folder"] else "Build", p["name"], " and ".join(where)])
+		_:
+			log_banner(("Publish %s to %s" if ctx["folder"] else "Build and publish %s to %s") % [p["name"], " and ".join(where)])
 
 	# 0) A wrong depot ID, a missing branch, a bad API key or an unknown itch.io
 	# game only fail at the upload, after every export, with a vague error.
 	# Ask the stores first. A target that fails here is skipped; the others go on.
+	var started := Time.get_ticks_msec()
+	var wanted := int(ctx["steam"]) + int(ctx["itch"])
 	if ctx["steam"]:
 		var check := await _preflight_steam(ctx)
 		if check == "cancelled":
-			return
+			ctx["stage"] = "cancelled"
+			return ctx
 		ctx["depot_check"] = check
 		ctx["steam"] = check != "failed"
 	if ctx["itch"]:
 		var check := await _preflight_itch(ctx)
 		if check == "cancelled":
-			return
+			ctx["stage"] = "cancelled"
+			return ctx
 		ctx["itch"] = check != "failed"
-	if not ctx["steam"] and not ctx["itch"]:
+	ctx["timings"]["preflight_ms"] = Time.get_ticks_msec() - started
+	var passed := int(ctx["steam"]) + int(ctx["itch"])
+	if passed == 0 or (passed < wanted and options.get("all_or_nothing", false)):
 		_finish_publish(ctx)
-		return
+		return ctx
+	if mode == "check":
+		ctx["stage"] = "done"
+		_finish_publish(ctx)
+		return ctx
 
 	# 1) One export per row that a remaining target needs.
+	ctx["stage"] = "export"
+	started = Time.get_ticks_msec()
 	if not await _export_rows(ctx):
-		return
+		if ctx.get("cancelled", false):
+			ctx["stage"] = "cancelled"
+		return ctx
+	ctx["timings"]["export_ms"] = Time.get_ticks_msec() - started
+	if ctx["smoke_seconds"] > 0.0:
+		ctx["stage"] = "smoke"
+		started = Time.get_ticks_msec()
+		var smoke_ok := await _smoke_test_rows(ctx)
+		ctx["timings"]["smoke_ms"] = Time.get_ticks_msec() - started
+		if not smoke_ok:
+			if ctx.get("cancelled", false):
+				ctx["stage"] = "cancelled"
+			return ctx
+	if mode == "dry_run":
+		ctx["stage"] = "done"
+		_finish_publish(ctx)
+		return ctx
 
 	# 2) Upload to each target in turn.
-	if ctx["steam"] and not await _publish_steam(ctx):
-		return
-	if ctx["itch"] and not await _publish_itch(ctx):
-		return
+	ctx["stage"] = "upload"
+	if ctx["steam"]:
+		started = Time.get_ticks_msec()
+		if not await _publish_steam(ctx):
+			ctx["stage"] = "cancelled"
+			return ctx
+		ctx["timings"]["steam_upload_ms"] = Time.get_ticks_msec() - started
+	if ctx["itch"]:
+		started = Time.get_ticks_msec()
+		if not await _publish_itch(ctx):
+			ctx["stage"] = "cancelled"
+			return ctx
+		ctx["timings"]["itch_upload_ms"] = Time.get_ticks_msec() - started
+	ctx["stage"] = "done"
 	_finish_publish(ctx)
+	return ctx
 
 
 ## Everything a Build & Publish run of [param p] needs, read up front:
@@ -3576,6 +3684,12 @@ func _make_publish_ctx(p: Dictionary) -> Dictionary:
 		"depot_check": "",
 		"rows": rows,
 		"results": [],
+		# Filled as the run goes, read by the command line (see Cli):
+		# stage durations, Steam's branches (name → live build ID) and the
+		# BuildID SteamCMD reported for the upload.
+		"timings": {},
+		"steam_branches": {},
+		"steam_build_id": "",
 	}
 
 
@@ -3602,6 +3716,7 @@ func _add_result(ctx: Dictionary, target: String, ok: bool, text: String, color 
 func _publish_cancelled(ctx: Dictionary) -> bool:
 	if not _bail_if_cancelled():
 		return false
+	ctx["cancelled"] = true
 	_restore_description(ctx["p"], ctx["description"])
 	return true
 
@@ -3656,6 +3771,7 @@ func _preflight_steam(ctx: Dictionary) -> String:
 	# have been fixed in Steamworks since, so only a branch with a build (or
 	# no branch) may skip the SteamCMD run.
 	var branch_ready := branch.is_empty() or _branch_has_build(_steam_branches.get(app_id, {}), branch)
+	ctx["steam_branches"] = _steam_branches.get(app_id, {})
 	if not cached.is_empty() and _ids_not_listed(wanted, cached).is_empty() and branch_ready:
 		return "confirmed"
 
@@ -3678,6 +3794,7 @@ func _preflight_steam(ctx: Dictionary) -> String:
 	_mark_login_verified()
 	if typed_code:
 		%SteamGuardCode.text = ""  # Used up; the upload signs in with the cached session.
+	ctx["steam_branches"] = res["branches"]
 
 	var listed: PackedStringArray = res["all_ids"]
 	if listed.is_empty():
@@ -3818,6 +3935,7 @@ func _export_rows(ctx: Dictionary) -> bool:
 			return false
 		var out_path := row_dir.path_join(row["file"])
 		log_step("Exporting '%s' as %s → %s" % [row["preset"], out_path.get_file(), " and ".join(goes_to)])
+		var export_started := Time.get_ticks_msec()
 
 		var code := await run_process(godot, [
 			"--headless",
@@ -3846,8 +3964,158 @@ func _export_rows(ctx: Dictionary) -> bool:
 			# the zip file. Rename it so it matches the executable in the table.
 			if row["kind"] == "macos":
 				_rename_app_bundle(row_dir, row["output"])
+		row["exported"] = true
+		row["export_ms"] = Time.get_ticks_msec() - export_started
 		log_step_done(true, "may not launch" if _exec_bits_lost and row["kind"] == "macos" else "")
 	return true
+
+
+## Lines (lowercase) a Godot build prints when a script fails to load. Some
+## only fail in an exported build, e.g. a script that uses an editor-only
+## class such as EditorInterface still runs from the editor.
+const SMOKE_SCRIPT_ERRORS: PackedStringArray = ["script error", "parse error", "failed to load script"]
+
+
+## Optional Build & Publish step after the export (the command line's smoke
+## test): starts every exported row this machine can run, headless, for
+## ctx["smoke_seconds"] and collects the script errors it prints into
+## row["smoke"] = { ran, reason, seconds, exit_code, crashed, script_errors,
+## errors, timed_out }. The game runs with a scratch home folder, so its
+## user:// (saves, settings, logs) is not the player's real one, and with
+## GODOTPIPE_SMOKE_TEST=1 and the user argument --godotpipe-smoke-test, so it
+## can skip things like signing in to Steam. Returns false when the run
+## ended here: cancelled, or ctx["strict"] and a build had script errors or
+## crashed.
+func _smoke_test_rows(ctx: Dictionary) -> bool:
+	var p: Dictionary = ctx["p"]
+	var seconds: float = ctx["smoke_seconds"]
+	var failed := PackedStringArray()
+	for row: Dictionary in ctx["rows"]:
+		if not row.get("exported", false):
+			continue
+		var exe := _runnable_export(row)
+		if exe.is_empty():
+			var reason := "a %s build cannot run on %s" % [row["kind"] if not str(row["kind"]).is_empty() else "build", OS.get_name()]
+			row["smoke"] = {"ran": false, "reason": reason}
+			log_line("%s was not started: %s." % [row["label"], reason], COLOR_INFO)
+			continue
+		log_step("Starting %s headless for %ds to catch script errors" % [row["label"], int(seconds)])
+		var home: String = str(ctx["build_dir"]).path_join("smoke_home")
+		_remove_dir_recursive(home)
+		if not _make_dir(home):
+			_fail_publish(p, ctx["description"], "no scratch folder")
+			return false
+		var env := {
+			"HOME": home,  # macOS and Linux keep user:// under it.
+			"XDG_DATA_HOME": home.path_join(".local/share"),
+			"XDG_CONFIG_HOME": home.path_join(".config"),
+			"XDG_CACHE_HOME": home.path_join(".cache"),
+			"APPDATA": home.path_join("AppData/Roaming"),  # Windows
+			"LOCALAPPDATA": home.path_join("AppData/Local"),
+			"GODOTPIPE_SMOKE_TEST": "1",
+		}
+		var lines: Array[String] = []
+		var collect := func(line: String, _is_stderr: bool, _tool: String) -> void:
+			lines.append(line)
+		child_output.connect(collect)
+		var state := {"running": true}
+		get_tree().create_timer(seconds).timeout.connect(func() -> void:
+			if state["running"] and _child_pid > 0:
+				_child_timed_out = true
+				_kill_child()
+		)
+		var started := Time.get_ticks_msec()
+		var code := await run_process(exe, PackedStringArray(["--headless", "--", "--godotpipe-smoke-test"]), "game", false, env)
+		var timed_out := _child_timed_out
+		state["running"] = false
+		child_output.disconnect(collect)
+		if _publish_cancelled(ctx):
+			return false
+		var result := _smoke_findings(lines)
+		result["ran"] = true
+		result["seconds"] = (Time.get_ticks_msec() - started) / 1000.0
+		result["timed_out"] = timed_out
+		result["exit_code"] = -1 if timed_out else code
+		result["crashed"] = not timed_out and code != 0
+		row["smoke"] = result
+		var script_errors: Array = result["script_errors"]
+		for line: String in script_errors:
+			log_line(line, COLOR_ERR)
+		if result["crashed"]:
+			log_line("%s quit with exit code %d within %ds of starting." % [row["label"], code, int(seconds)], COLOR_ERR)
+		if script_errors.is_empty() and not result["crashed"]:
+			log_line("No script errors%s." % ("" if timed_out else ", and it quit by itself"), COLOR_OK)
+			log_step_done(true, "%d other error lines" % result["errors"].size() if not result["errors"].is_empty() else "")
+		else:
+			failed.append(row["label"])
+			log_step_done(false, "%s" % _plural(script_errors.size(), "script error"))
+	_remove_dir_recursive(str(ctx["build_dir"]).path_join("smoke_home"))
+	if failed.is_empty():
+		return true
+	if ctx["strict"]:
+		log_line("Stopped before the upload: %s %s script errors or crashed when started (strict)." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_ERR)
+		_fail_publish(p, ctx["description"], "script errors")
+		return false
+	log_line("%s %s script errors or crashed when started. Going on with the upload; strict mode stops here instead." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_WARN)
+	return true
+
+
+## The executable of exported [param row] when it can run on this machine
+## (its platform is this OS), or "".
+func _runnable_export(row: Dictionary) -> String:
+	var host: String = {"macOS": "macos", "Windows": "windows", "Linux": "linux"}.get(OS.get_name(), "")
+	if host.is_empty() or row["kind"] != host:
+		return ""
+	var dir: String = row["dir"]
+	if host != "macos":
+		var path := dir.path_join(row["file"])
+		return path if FileAccess.file_exists(path) else ""
+	# The bundle normally carries the executable name (see _rename_app_bundle).
+	var bundles := PackedStringArray([str(row["output"]) + ".app"])
+	var listing := DirAccess.open(dir)
+	if listing != null:
+		for entry in listing.get_directories():
+			if entry.to_lower().ends_with(".app") and not bundles.has(entry):
+				bundles.append(entry)
+	for bundle in bundles:
+		var macos_dir := dir.path_join(bundle).path_join("Contents/MacOS")
+		var files := DirAccess.get_files_at(macos_dir)
+		if files.size() == 1:
+			return macos_dir.path_join(files[0])
+	return ""
+
+
+## Script errors (see SMOKE_SCRIPT_ERRORS) and other ERROR lines in what an
+## exported build printed, each with the "at:" line Godot puts under it and
+## once, with " (×n)" when it was printed n times.
+static func _smoke_findings(lines: Array[String]) -> Dictionary:
+	var script_errors: Array[String] = []
+	var errors: Array[String] = []
+	var counts := {}
+	for i in lines.size():
+		var line := lines[i].strip_edges()
+		var lower := line.to_lower()
+		var is_script := false
+		for needle in SMOKE_SCRIPT_ERRORS:
+			if lower.contains(needle):
+				is_script = true
+				break
+		if not is_script and not lower.begins_with("error:"):
+			continue
+		if i + 1 < lines.size() and lines[i + 1].strip_edges().begins_with("at:"):
+			line += " (%s)" % lines[i + 1].strip_edges()
+		counts[line] = counts.get(line, 0) + 1
+		if counts[line] > 1:
+			continue
+		if is_script:
+			script_errors.append(line)
+		else:
+			errors.append(line)
+	for list: Array[String] in [script_errors, errors]:
+		for j in list.size():
+			if counts[list[j]] > 1:
+				list[j] += " (×%d)" % counts[list[j]]
+	return {"script_errors": script_errors.slice(0, 100), "errors": errors.slice(0, 100)}
 
 
 ## Build & Publish step 2 for Steam: writes the build script and uploads with
@@ -3865,9 +4133,11 @@ func _publish_steam(ctx: Dictionary) -> bool:
 	var steam_args := _steam_login_args()
 	steam_args.append_array(["+run_app_build", vdf_path, "+quit"])
 	var typed_code: bool = not %SteamGuardCode.text.strip_edges().is_empty()
-	var upload_code := await run_process(ctx["steamcmd"], steam_args)
+	var upload := await run_process_capture(ctx["steamcmd"], steam_args)
+	var upload_code: int = upload["code"]
 	if _publish_cancelled(ctx):
 		return false
+	ctx["steam_build_id"] = _steam_build_id(upload["output"])
 	if upload_code != 0:
 		log_line("SteamCMD upload failed (exit code %d)." % upload_code, COLOR_ERR)
 		if ctx["depot_check"] == "confirmed" and _seen_issues.has("build_access_denied"):
@@ -3928,6 +4198,13 @@ func _publish_itch(ctx: Dictionary) -> bool:
 		log_line(ITCH_HTML_NOTE, COLOR_INFO)
 	_add_result(ctx, "itch.io", true, "Pushed %s to %s%s." % [", ".join(pushed), target, version])
 	return true
+
+
+## The BuildID SteamCMD reports after run_app_build ("Successfully finished
+## AppID 480 build (BuildID 1234567)."), or "" when [param output] has none.
+static func _steam_build_id(output: String) -> String:
+	var found := RegEx.create_from_string("BuildID\\s+(\\d+)").search_all(output)
+	return found.back().get_string(1) if not found.is_empty() else ""
 
 
 ## True when a row of platform [param kind] went to [param target] ("steam"
@@ -4313,6 +4590,7 @@ func _explain_guard_failure(code_supplied: bool) -> bool:
 	var guard_related := _guard_failure_seen or _guard_prompt_seen or _guard_code_sent
 	if not guard_related:
 		return false
+	auth_needed = auth_needed or cli_mode
 	var status: String
 	var msg: String
 	var focus: LineEdit = %SteamGuardCode
@@ -4335,7 +4613,7 @@ func _explain_guard_failure(code_supplied: bool) -> bool:
 		msg = "Type the Steam Guard code from the Steam mobile app or your email and press Sign in again."
 	%SteamStatusLabel.text = status
 	log_line(msg, COLOR_INFO)
-	if not %SetupPage.visible:
+	if not %SetupPage.visible and not cli_mode:
 		_show_project(-1)  # Put the code field on screen.
 	focus.grab_focus()
 	focus.select_all()
@@ -4350,18 +4628,21 @@ func _on_guard_prompt() -> void:
 		return
 	_guard_prompt_seen = true
 	var secret: String = %SteamSharedSecret.text
-	if not secret.strip_edges().is_empty():
+	if not secret.strip_edges().is_empty() and not (cli_mode and _guard_code_sent):
 		var code := steam_totp(secret)
 		if not code.is_empty():
 			log_line("Steam Guard code requested — sending the generated TOTP code.", COLOR_INFO)
 			_guard_code_sent = _write_child_stdin(code)
 			return
 	_session_lost()
+	if cli_mode:
+		_stop_for_sign_in("SteamCMD asks for a Steam Guard code%s." % (" again: the generated one was rejected" if _guard_code_sent else ""))
+		return
 	if _awaiting_guard_code:
 		return  # A wrong code makes SteamCMD ask again; the field is already open.
 	_awaiting_guard_code = true
 	_set_status_dot(%AccountDot, COLOR_WARN)
-	if not %SetupPage.visible:
+	if not %SetupPage.visible and not cli_mode:
 		_show_project(-1)  # Put the code field on screen.
 	%SteamGuardCode.grab_focus()
 	%SteamGuardCode.select_all()
@@ -4422,10 +4703,13 @@ func _on_guard_wait() -> void:
 	if _guard_wait_seen:
 		return
 	_guard_wait_seen = true
+	if cli_mode:
+		_stop_for_sign_in("SteamCMD waits for the sign-in to be approved in the Steam mobile app.")
+		return
 	_set_status_dot(%AccountDot, COLOR_WARN)
 	%SteamStatusLabel.text = "Approve in the Steam mobile app…"
 	_allow_code_submit()
-	if not %SetupPage.visible:
+	if not %SetupPage.visible and not cli_mode:
 		_show_project(-1)  # Put the code field on screen.
 	log_line("Steam sent a confirmation to the Steam mobile app. Approve it there to continue, or type the Steam Guard code and press Submit code.", COLOR_INFO)
 
@@ -4493,6 +4777,14 @@ func _on_steam_sign_out_pressed() -> void:
 	log_line("Signed out. The next sign-in will ask for the password and Steam Guard again.", COLOR_OK)
 	log_step_done(true)
 	_refresh_setup_state()
+
+
+## Command-line mode: SteamCMD wants something only a person can give, and
+## nobody can answer it there. Stops SteamCMD and flags the run.
+func _stop_for_sign_in(reason: String) -> void:
+	auth_needed = true
+	log_line("%s The command line cannot answer that: sign in once in the %s window (Setup page → Sign in); SteamCMD caches the session and later runs from the command line use it." % [reason, _app_name()], COLOR_ERR)
+	_kill_child()
 
 
 ## Restores the login button after a code was sent or the process ended.
@@ -5249,16 +5541,23 @@ func run_process(exe: String, args: PackedStringArray, tool := "", restarted := 
 	_seen_issues.clear()
 	_progress = ConsoleProgress.new(tool, _progress_label) if ConsoleProgress.reads(tool) else null
 
+	# Values the variables had before, put back once the child started.
+	var previous := {}
 	if not env.is_empty():
 		# A credential-store helper started by the secret thread right now
 		# would inherit the variables too; let it finish first.
 		while _secret_thread != null:
 			await get_tree().process_frame
 		for key: String in env:
+			if OS.has_environment(key):
+				previous[key] = OS.get_environment(key)
 			OS.set_environment(key, env[key])
 	var info := OS.execute_with_pipe(exe, args, false)
 	for key: String in env:
-		OS.unset_environment(key)
+		if previous.has(key):
+			OS.set_environment(key, previous[key])
+		else:
+			OS.unset_environment(key)
 	if info.is_empty():
 		_log_start_failure(program)
 		return -1
@@ -5269,6 +5568,7 @@ func run_process(exe: String, args: PackedStringArray, tool := "", restarted := 
 	_child_stdio = stdio
 	_child_pid = pid
 	_child_killed = false
+	_child_timed_out = false
 	_guard_prompt_seen = false
 	_guard_code_sent = restarted
 	_guard_failure_seen = false
@@ -5315,6 +5615,9 @@ func run_process(exe: String, args: PackedStringArray, tool := "", restarted := 
 	if _cancel_requested:
 		_finish_bar(false)
 		log_line("Stopped.", COLOR_WARN)
+	elif _child_timed_out:
+		_finish_bar(true)
+		log_line("↳ stopped as planned after the set time", COLOR_MUTED)
 	else:
 		log_exit(exit_code)
 		# Through /usr/bin/env a program that cannot start does not fail the
@@ -5464,6 +5767,7 @@ func _emit_pipe_line(line: String, is_stderr: bool) -> void:
 	line = _mask_secrets(_ansi_re.sub(line, "", true))
 	if line.is_empty():
 		return
+	child_output.emit(line, is_stderr, _child_tool)
 	if not _show_progress(line, is_stderr):
 		log_out(line, is_stderr)
 	if _capturing and not is_stderr:
@@ -5581,6 +5885,7 @@ func _on_password_prompt() -> void:
 		log_line("Steam asked for the password — sending it.", COLOR_INFO)
 		_password_sent = _write_child_stdin(password)
 		return
+	auth_needed = auth_needed or cli_mode
 	if _password_sent:
 		log_line("Steam did not accept the password. Check it on the Setup page.", COLOR_ERR)
 	else:
@@ -6032,6 +6337,7 @@ func _on_discord_avatar_ready(url: String, texture: Texture2D) -> void:
 func log_line(text: String, color: String = COLOR_INFO) -> void:
 	if color == COLOR_ERR and _step_open:
 		_step_failed = true
+	console_emitted.emit("line", text, color)
 	_emit("[color=%s]%s[/color]" % [color, _bb_escape(text)])
 
 
@@ -6039,6 +6345,7 @@ func log_line(text: String, color: String = COLOR_INFO) -> void:
 func log_banner(title: String) -> void:
 	_close_step_if_open()
 	_spacer()
+	console_emitted.emit("banner", title, COLOR_TEXT)
 	_emit("[font_size=13][color=%s]%s[/color][/font_size]" % [COLOR_TEXT, _bb_escape(title)])
 
 
@@ -6047,6 +6354,7 @@ func log_banner(title: String) -> void:
 func log_step(title: String) -> void:
 	_close_step_if_open()
 	_end_bar()
+	console_emitted.emit("step", title, COLOR_TEXT)
 	_emit("[color=%s]▸[/color] [color=%s]%s[/color]" % [COLOR_TEXT_2, COLOR_TEXT, _bb_escape(title)])
 	_step_open = true
 	_step_failed = false
@@ -6061,6 +6369,7 @@ func log_step_done(ok: bool, note: String = "") -> void:
 	var elapsed := "%.1fs" % ((Time.get_ticks_msec() - _step_started_ms) / 1000.0)
 	var detail := elapsed if note.is_empty() else "%s · %s" % [elapsed, _bb_escape(note)]
 	_step_open = false
+	console_emitted.emit("step_done", "%s · %s" % ["✓ Done" if ok else "✗ Failed", detail], COLOR_OK if ok else COLOR_ERR)
 	if ok:
 		_emit("[color=%s]✓ Done[/color] [color=%s]· %s[/color]" % [COLOR_OK, COLOR_MUTED, detail])
 	else:
@@ -6070,6 +6379,7 @@ func log_step_done(ok: bool, note: String = "") -> void:
 
 ## Echo of a command line about to run, drawn as a highlighted pill.
 func log_cmd(exe: String, args: PackedStringArray) -> void:
+	console_emitted.emit("cmd", ("$ %s %s" % [exe, " ".join(args)]).strip_edges(), COLOR_CMD)
 	var cmd := _bb_escape(("%s %s" % [exe, " ".join(args)]).strip_edges())
 	_emit("[bgcolor=%s][color=%s] $ %s [/color][/bgcolor]" % [COLOR_CMD_BG, COLOR_CMD, cmd])
 
@@ -6077,6 +6387,7 @@ func log_cmd(exe: String, args: PackedStringArray) -> void:
 ## One line of a child process's output. stderr is not treated as a warning
 ## (most tools print progress there); it only gets a tinted gutter bar.
 func log_out(line: String, is_stderr: bool) -> void:
+	console_emitted.emit("out", line, COLOR_GUTTER_ERR if is_stderr else COLOR_OUT)
 	_emit("[color=%s]%s[/color]" % [COLOR_OUT, _bb_escape(line)], COLOR_GUTTER_ERR if is_stderr else COLOR_GUTTER)
 
 
@@ -6085,6 +6396,7 @@ func log_exit(code: int) -> void:
 	_finish_bar(code == 0)
 	if code != 0 and _step_open:
 		_step_failed = true
+	console_emitted.emit("exit", "↳ exit %d" % code, COLOR_MUTED if code == 0 else COLOR_ERR)
 	_emit("[color=%s]↳ exit %d[/color]" % [COLOR_MUTED if code == 0 else COLOR_ERR, code])
 
 
@@ -6148,6 +6460,7 @@ func _progress_update(label: String, pct: float, failed := false) -> void:
 		_end_bar()
 	_bar_label = label
 	_bar_pct = whole
+	progress_changed.emit(label, whole)
 	var filled := int(BAR_CELLS * whole / 100.0)
 	var done := whole >= 100
 	var fill_color := COLOR_ERR if failed else (COLOR_OK if done else COLOR_CMD)
@@ -6476,6 +6789,8 @@ func _read_project_name(dir: String) -> String:
 
 
 func _save_projects() -> void:
+	if cli_mode:
+		return  # Overrides from the command line apply to one run only.
 	var cfg := ConfigFile.new()
 	for i in _projects.size():
 		for key in _projects[i]:
@@ -6597,6 +6912,8 @@ func _report_save(err: Error, path: String) -> void:
 ## (see [method _persist_secrets]) and otherwise live in memory until the app
 ## quits.
 func _save_settings() -> void:
+	if cli_mode:
+		return  # The command line never changes the Setup page.
 	var cfg := ConfigFile.new()
 	cfg.set_value("tools", "steamcmd_binary", %SteamCmdBinary.text)
 	cfg.set_value("tools", "butler_binary", %ButlerBinary.text)
@@ -6651,10 +6968,11 @@ func _load_settings() -> void:
 	if _login_ok():
 		%SteamStatusLabel.text = "Signed in"
 		# Cached avatar (or a fresh one when nothing is cached yet).
-		%SteamProfile.fetch(_login_verified_user, _resolve_steamcmd(%SteamCmdBinary.text))
+		if not cli_mode:
+			%SteamProfile.fetch(_login_verified_user, _resolve_steamcmd(%SteamCmdBinary.text))
 	if _itch_verified and %ItchApiKey.text.strip_edges().is_empty():
 		_itch_verified = false  # The key was not remembered; sign in again.
-	if _itch_ok():
+	if _itch_ok() and not cli_mode:
 		%ItchStatusLabel.text = "Signed in as %s" % _itch_user
 		# Trust the remembered sign-in now, check the key and avatar quietly.
 		_itch_profile_serial = %ItchApi.fetch_profile(%ItchApiKey.text)
@@ -6741,6 +7059,8 @@ func _secret_changes() -> Dictionary:
 ## secrets that changed and erases the ones whose Remember toggle is off. Runs
 ## on a worker thread, since a round trip can take a second.
 func _persist_secrets() -> void:
+	if cli_mode:
+		return
 	if SecretStore.backend().is_empty():
 		return
 	if _secret_thread != null:
@@ -6797,7 +7117,7 @@ func _record_secret_writes(changes: Dictionary, failed: PackedStringArray) -> vo
 func _flush_secrets() -> void:
 	_secrets_dirty = false
 	_finish_secret_write()
-	if SecretStore.backend().is_empty():
+	if cli_mode or SecretStore.backend().is_empty():
 		return
 	var changes := _secret_changes()
 	var failed := PackedStringArray()

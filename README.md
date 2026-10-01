@@ -60,6 +60,76 @@ The shared secret field is optional and for advanced use only. It is the **Share
 
 The password and shared secret are never written to a settings file. With **Remember** on they go to the system's credential store: the login Keychain on macOS (items named `GodotPipe`), DPAPI on Windows (an encrypted value in `user://secrets.cfg` that only your Windows user account can decrypt), and the Secret Service on Linux (GNOME Keyring or KWallet through `secret-tool`). On Linux without `secret-tool` or a running keyring, **Remember** is turned off and the fields are only kept until you quit. With **Remember** off they are only kept in memory. Older versions saved them as plain text in `user://settings.cfg`; the app moves them to the credential store on the next start and removes them from the file. The password is also never put on SteamCMD's command line, where other programs could read it: the app types it in when SteamCMD asks for it.
 
+## Command line
+
+GodotPipe also runs headless from a terminal or a script, straight from this repository (no need to export GodotPipe itself). It uses the apps, Setup page and sign-ins you set up in the window, and runs the same checks, exports and SteamCMD/butler uploads as **Build & Publish**. Without arguments after `--` the window starts as usual.
+
+```bash
+godot --headless --path ~/Documents/github/GodotPipe -- publish --project "Digging A Hole In Ice With A Chainsaw" --desc "1.06" --json
+```
+
+`godot` is any Godot 4.7 editor binary. Open this repository in the Godot editor once first (or run `godot --headless --path <repo> --import`), so its `.godot` folder exists.
+
+| Command | What it does |
+| --- | --- |
+| `list` | The Setup page state (SteamCMD, butler, signed in or not) and every app: stores, App ID, branch, itch.io game, build rows (preset, executable, depot, channel) and the project's export presets. |
+| `check --project <app>` | Everything Build & Publish checks before it exports, including the store checks: SteamCMD signs in and reads the app's depots and branches, butler reads the itch.io game. Nothing is exported or uploaded. |
+| `publish --project <app>` | Build & Publish: export every row, start the exported build (see below), upload. |
+| `help` | Usage. |
+
+Options:
+
+- `--project <app>`: the app's `project.godot`, its folder, its name (or a unique part of it) or its Steam App ID. The app has to be added in the window first; that is where its App ID, depots and channels live.
+- `--stores steam,itch`: publish to these stores in this run (default: the stores ticked for the app).
+- `--desc <text>`: the Steam build description. For an app that only goes to itch.io it is the version itch.io shows (the default is the project's `application/config/version`).
+- `--branch <name>`: set the build live on this beta branch after the upload (SteamPipe's `SetLive`). `default` and `public` are refused, see below.
+- `--dry-run`: check, export and start the build, but upload nothing.
+- `--strict`: stop before uploading when an exported build printed script errors or crashed when started.
+- `--smoke-seconds <n>`: how long each exported build runs (default 15); `--no-smoke` skips that step.
+- `--json`: end with a one-line JSON summary as the last line on stdout.
+- `--log <file>`: where the full console goes. By default each run writes `user://cli_logs/<date>_<command>.log` (on macOS `~/Library/Application Support/Godot/app_userdata/GodotPipe/cli_logs/`); the newest 50 are kept.
+
+Nothing a run does is saved: the overrides apply to that run only, and `projects.cfg`, `settings.cfg` and the credential store are left as they are. Secrets are never printed; the console masks them as in the window.
+
+**Signing in.** The command line uses the cached SteamCMD session, the remembered password and shared secret, and the remembered itch.io API key, like the window. It cannot answer prompts: when SteamCMD asks for a Steam Guard code (and no shared secret is set), waits for approval in the Steam mobile app, or asks for a password that is not remembered, the run stops with exit code 6 instead of waiting. Sign in once in the window (Setup page → **Sign in**); SteamCMD caches the session and later runs use it.
+
+**Starting the exported build.** After the export, every build this computer can run (the macOS row on a Mac, Windows on Windows, Linux on Linux) is started headless for a few seconds and its output is searched for `SCRIPT ERROR`, `Parse Error` and `Failed to load script` lines. These catch scripts that only fail in an exported build, such as one that uses `EditorInterface`, which works when run from the editor. The game runs with a scratch home folder (`HOME`, `XDG_*`, `APPDATA`), so its `user://` saves and settings are not touched. It also gets the environment variable `GODOTPIPE_SMOKE_TEST=1` and the user argument `--godotpipe-smoke-test`. The game still loads its GDExtensions as usual: a game that calls `Steam.steamInit()` at startup connects to the running Steam client, which then shows you in-game for those seconds and runs whatever the game does after the sign-in (achievements, stats). To skip that, check for the flag first, e.g. `if OS.has_environment("GODOTPIPE_SMOKE_TEST"): return`. The script errors and the other `ERROR:` lines are reported; a crash or script error fails the run only with `--strict`.
+
+**Setting the build live.** SteamCMD cannot set a build live on the default branch (Steam refuses it, see [Branches and setting builds live](#branches-and-setting-builds-live)). Without `--branch` the build is only uploaded; the summary then reports its Steam build ID (`stores.steam.build_id`) and the Steamworks Builds page (`stores.steam.builds_url`) where it is set live by hand.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Usage error, unknown app, or an internal error |
+| 2 | Pre-flight failed: a check before the export, or a store's check (depot IDs, branch, itch.io game) |
+| 3 | Export failed |
+| 4 | The exported build printed script errors or crashed when started (`--strict` only) |
+| 5 | Upload failed |
+| 6 | A sign-in is needed (Steam Guard code, mobile approval, password, itch.io API key) |
+
+A store that fails its check stops the whole run before anything is exported, so a run either goes to every requested store or none.
+
+The JSON summary (`--json`) has these fields:
+
+| Field | Content |
+| --- | --- |
+| `command`, `ok`, `exit_code`, `exit_reason` | The command and how it ended (`ok`, `usage`, `preflight_failed`, `export_failed`, `script_errors`, `upload_failed`, `auth_needed`). |
+| `mode`, `stage` | `check`, `dry_run` or `publish`, and where the run ended: `done`, `invalid` (the form check), `preflight`, `export`, `smoke`. |
+| `project` | `name`, `path`, `app_id`. |
+| `description` | The build description sent to Steam. |
+| `stores.steam` | `status` (`uploaded`, `upload_failed`, `preflight_failed`, `checked`, `ready` after a dry run, `not_uploaded`), `message`, `app_id`, `depots`, `branch`, `set_live`, `build_id`, `depot_check` (`confirmed` or `unknown`), `branches` (each branch Steam listed in the check before the export → its live build ID then; `public` is the default branch), `builds_url`, `duration_s`. |
+| `stores.itch` | `status`, `message`, `target`, `channels`, `version`, `page_url`, `duration_s`. |
+| `rows[]` | Per build row: `row`, `label`, `preset`, `platform`, `folder`, `depot_id`, `itch_channel`, `steam`, `itch`, `exported`, `export_s`, `files[]` (`path`, `size` in bytes; an `.app` counts as one entry) and total `size`, and `smoke` (`ran`, `reason` when not started, `seconds`, `timed_out`, `exit_code`, `crashed`, `script_errors[]`, `errors[]`). |
+| `timings` | Seconds per stage: `preflight_s`, `export_s`, `smoke_s`, `steam_upload_s`, `itch_upload_s`. |
+| `issues[]` | Every warning or error line in the output of Godot's export, the exported build, SteamCMD and butler: `source` (`godot`, `game`, `steamcmd`, `butler`, `other`), `stage` (the console step), `level` (`error` or `warning`), `line`, `count` (identical lines in the same step are listed once), and `benign: true` for lines the tools print on every successful run. |
+| `messages[]` | GodotPipe's own warnings and errors (`level`, `stage`, `text`), such as the reason a check failed and how to fix it. |
+| `notes[]` | Follow-ups, e.g. setting the uploaded build live in Steamworks. |
+| `duration_s`, `log_file` | Total run time and the full console log. |
+
+`list --json` prints `setup` (tool paths, account names and whether each store is signed in) and `apps[]` instead of the run fields.
+
 ## Platform notes
 
 The app runs on macOS, Windows and Linux; the export presets build all three. SteamCMD is an Intel 32-bit binary from Valve, so the host needs: on Apple Silicon Macs, Rosetta (`softwareupdate --install-rosetta`); on Linux, the 32-bit runtime (`sudo apt install lib32gcc-s1` on Debian/Ubuntu, `sudo dnf install glibc.i686 libstdc++.i686` on Fedora, `lib32-gcc-libs` from multilib on Arch) and `tar` on `PATH` for the **Download SteamCMD** button; on Windows, nothing extra (`steamcmd.exe` is unpacked with Godot's own zip reader). macOS exports are unpacked with `unzip` when it is on `PATH`; otherwise the app unpacks them itself and marks the bundle's binaries executable where the OS allows it. Windows can't, so build macOS depots on a Mac (or on Linux with `unzip`); the app warns when a macOS build lost its executable bits. Godot and SteamCMD are looked up on `PATH`, in the usual install folders of each OS and in every Steam library; the **Find** buttons and the file pickers cover anything else.
