@@ -87,7 +87,7 @@ Options:
 - `--strict`: stop before uploading when an exported build printed script errors or crashed when started.
 - `--smoke-seconds <n>`: how long each exported build runs (default 15); `--no-smoke` skips that step.
 - `--json`: end with a one-line JSON summary as the last line on stdout.
-- `--log <file>`: where the full console goes. By default each run writes `user://cli_logs/<date>_<command>.log` (on macOS `~/Library/Application Support/Godot/app_userdata/GodotPipe/cli_logs/`); the newest 50 are kept.
+- `--log <file>`: where the full console goes. By default each run writes `user://cli_logs/<date>_<command>.log` (on macOS `~/Library/Application Support/GodotPipe/cli_logs/`); the newest 50 are kept.
 
 Nothing a run does is saved: the overrides apply to that run only, and `projects.cfg`, `settings.cfg` and the credential store are left as they are. Secrets are never printed; the console masks them as in the window.
 

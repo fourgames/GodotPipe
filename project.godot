@@ -20,6 +20,8 @@ boot_splash/show_image=false
 boot_splash/stretch_mode=0
 boot_splash/use_filter=false
 config/icon="uid://r8phqwxmscr4"
+config/use_custom_user_dir=true
+config/custom_user_dir_name="GodotPipe"
 
 [audio]
 
