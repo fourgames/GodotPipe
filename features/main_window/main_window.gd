@@ -151,6 +151,7 @@ var _console_dragging := false  # true while the user drags the console scrollba
 
 const Motion := preload("res://features/main_window/ui_motion.gd")
 const ConsoleProgress := preload("res://features/main_window/console_progress.gd")
+const ScriptCheck := preload("res://features/main_window/script_check.gd")
 ## Command-line mode (preloaded by path: a class_name only resolves after the
 ## editor rescanned the project).
 const Cli := preload("res://features/cli/cli.gd")
@@ -3512,7 +3513,7 @@ func _on_build_publish_pressed() -> void:
 		return
 	if _selected_index < 0:
 		return
-	await build_and_publish()
+	await build_and_publish({"strict": true})
 
 
 ## Build & Publish of the app on screen, shared by the button and the command
@@ -3520,9 +3521,12 @@ func _on_build_publish_pressed() -> void:
 ## - "mode": "publish" (the button), "check" (the checks and the store
 ##   checks, nothing exported) or "dry_run" (also exports, nothing uploaded).
 ## - "smoke_seconds": when above 0, every export this machine can run is
-##   started headless for that long and its script errors are collected
-##   (see [method _smoke_test_rows]). "strict" then stops before the upload
-##   when one of them failed.
+##   started headless for that long and its script errors are collected.
+## - "script_check" (default true): every script of every export this
+##   machine can run is loaded, and the files every scene and resource needs
+##   are checked, in a copy of the build (see [method _smoke_test_rows]).
+## - "strict": stop before the upload when either found something. The
+##   button always passes it.
 ## - "all_or_nothing": a store that fails its check stops the whole run
 ##   instead of letting the other store go on.
 ## Returns the run's ctx (see [method _make_publish_ctx]) with "stage" set
@@ -3539,6 +3543,7 @@ func build_and_publish(options := {}) -> Dictionary:
 	ctx["mode"] = mode
 	ctx["smoke_seconds"] = float(options.get("smoke_seconds", 0.0))
 	ctx["strict"] = bool(options.get("strict", false))
+	ctx["script_check"] = bool(options.get("script_check", true))
 	ctx["stage"] = "preflight"
 	if mode == "publish":
 		# The description works like a chat box: it is sent with this build and the
@@ -3602,7 +3607,7 @@ func build_and_publish(options := {}) -> Dictionary:
 			ctx["stage"] = "cancelled"
 		return ctx
 	ctx["timings"]["export_ms"] = Time.get_ticks_msec() - started
-	if ctx["smoke_seconds"] > 0.0:
+	if ctx["smoke_seconds"] > 0.0 or ctx["script_check"]:
 		ctx["stage"] = "smoke"
 		started = Time.get_ticks_msec()
 		var smoke_ok := await _smoke_test_rows(ctx)
@@ -3976,19 +3981,28 @@ func _export_rows(ctx: Dictionary) -> bool:
 const SMOKE_SCRIPT_ERRORS: PackedStringArray = ["script error", "parse error", "failed to load script"]
 
 
-## Optional Build & Publish step after the export (the command line's smoke
-## test): starts every exported row this machine can run, headless, for
-## ctx["smoke_seconds"] and collects the script errors it prints into
-## row["smoke"] = { ran, reason, seconds, exit_code, crashed, script_errors,
-## errors, timed_out }. The game runs with a scratch home folder, so its
-## user:// (saves, settings, logs) is not the player's real one, and with
-## GODOTPIPE_SMOKE_TEST=1 and the user argument --godotpipe-smoke-test, so it
-## can skip things like signing in to Steam. Returns false when the run
-## ended here: cancelled, or ctx["strict"] and a build had script errors or
-## crashed.
+## How long the script check may take before it counts as hung.
+const SCRIPT_CHECK_TIMEOUT := 300.0
+
+
+## Build & Publish step after the export: tests every exported row this
+## machine can run, headless, with a scratch home folder (so the game's
+## user:// is not the player's real one), GODOTPIPE_SMOKE_TEST=1 and the user
+## argument --godotpipe-smoke-test (so it can skip things like signing in to
+## Steam).
+## - ctx["smoke_seconds"] above 0 (the command line's smoke test): starts the
+##   build for that long and collects the script errors it prints into
+##   row["smoke"] = { ran, reason, seconds, exit_code, crashed, script_errors,
+##   errors, timed_out }.
+## - ctx["script_check"]: loads every script and checks the dependencies of
+##   every scene and resource in a copy of the build (see ScriptCheck and
+##   [method _script_check_row]), into row["script_check"].
+## Returns false when the run ended here: cancelled, or ctx["strict"] and a
+## build had script errors, missing files or crashed.
 func _smoke_test_rows(ctx: Dictionary) -> bool:
 	var p: Dictionary = ctx["p"]
 	var seconds: float = ctx["smoke_seconds"]
+	var home: String = str(ctx["build_dir"]).path_join("smoke_home")
 	var failed := PackedStringArray()
 	for row: Dictionary in ctx["rows"]:
 		if not row.get("exported", false):
@@ -3996,15 +4010,12 @@ func _smoke_test_rows(ctx: Dictionary) -> bool:
 		var exe := _runnable_export(row)
 		if exe.is_empty():
 			var reason := "a %s build cannot run on %s" % [row["kind"] if not str(row["kind"]).is_empty() else "build", OS.get_name()]
-			row["smoke"] = {"ran": false, "reason": reason}
-			log_line("%s was not started: %s." % [row["label"], reason], COLOR_INFO)
+			if seconds > 0.0:
+				row["smoke"] = {"ran": false, "reason": reason}
+			if ctx["script_check"]:
+				row["script_check"] = {"ran": false, "reason": reason}
+			log_line("%s was not %s: %s." % [row["label"], "started" if seconds > 0.0 else "checked for script errors", reason], COLOR_INFO)
 			continue
-		log_step("Starting %s headless for %ds to catch script errors" % [row["label"], int(seconds)])
-		var home: String = str(ctx["build_dir"]).path_join("smoke_home")
-		_remove_dir_recursive(home)
-		if not _make_dir(home):
-			_fail_publish(p, ctx["description"], "no scratch folder")
-			return false
 		var env := {
 			"HOME": home,  # macOS and Linux keep user:// under it.
 			"XDG_DATA_HOME": home.path_join(".local/share"),
@@ -4014,49 +4025,216 @@ func _smoke_test_rows(ctx: Dictionary) -> bool:
 			"LOCALAPPDATA": home.path_join("AppData/Local"),
 			"GODOTPIPE_SMOKE_TEST": "1",
 		}
-		var lines: Array[String] = []
-		var collect := func(line: String, _is_stderr: bool, _tool: String) -> void:
-			lines.append(line)
-		child_output.connect(collect)
-		var state := {"running": true}
-		get_tree().create_timer(seconds).timeout.connect(func() -> void:
-			if state["running"] and _child_pid > 0:
-				_child_timed_out = true
-				_kill_child()
-		)
-		var started := Time.get_ticks_msec()
-		var code := await run_process(exe, PackedStringArray(["--headless", "--", "--godotpipe-smoke-test"]), "game", false, env)
-		var timed_out := _child_timed_out
-		state["running"] = false
-		child_output.disconnect(collect)
-		if _publish_cancelled(ctx):
-			return false
-		var result := _smoke_findings(lines)
-		result["ran"] = true
-		result["seconds"] = (Time.get_ticks_msec() - started) / 1000.0
-		result["timed_out"] = timed_out
-		result["exit_code"] = -1 if timed_out else code
-		result["crashed"] = not timed_out and code != 0
-		row["smoke"] = result
-		var script_errors: Array = result["script_errors"]
-		for line: String in script_errors:
-			log_line(line, COLOR_ERR)
-		if result["crashed"]:
-			log_line("%s quit with exit code %d within %ds of starting." % [row["label"], code, int(seconds)], COLOR_ERR)
-		if script_errors.is_empty() and not result["crashed"]:
-			log_line("No script errors%s." % ("" if timed_out else ", and it quit by itself"), COLOR_OK)
-			log_step_done(true, "%d other error lines" % result["errors"].size() if not result["errors"].is_empty() else "")
-		else:
+		var row_failed := false
+		if seconds > 0.0:
+			log_step("Starting %s headless for %ds to catch script errors" % [row["label"], int(seconds)])
+			_remove_dir_recursive(home)
+			if not _make_dir(home):
+				_fail_publish(p, ctx["description"], "no scratch folder")
+				return false
+			var run := await _run_headless(exe, env, seconds)
+			if _publish_cancelled(ctx):
+				return false
+			var result := _smoke_findings(run["lines"])
+			result["ran"] = true
+			result["seconds"] = run["seconds"]
+			result["timed_out"] = run["timed_out"]
+			result["exit_code"] = run["exit_code"]
+			result["crashed"] = not run["timed_out"] and run["exit_code"] != 0
+			row["smoke"] = result
+			var script_errors: Array = result["script_errors"]
+			for line: String in script_errors:
+				log_line(line, COLOR_ERR)
+			if result["crashed"]:
+				log_line("%s quit with exit code %d within %ds of starting." % [row["label"], run["exit_code"], int(seconds)], COLOR_ERR)
+			if script_errors.is_empty() and not result["crashed"]:
+				log_line("No script errors%s." % ("" if run["timed_out"] else ", and it quit by itself"), COLOR_OK)
+				log_step_done(true, "%d other error lines" % result["errors"].size() if not result["errors"].is_empty() else "")
+			else:
+				row_failed = true
+				log_step_done(false, "%s" % _plural(script_errors.size(), "script error"))
+		if ctx["script_check"]:
+			_remove_dir_recursive(home)
+			if not _make_dir(home):
+				_fail_publish(p, ctx["description"], "no scratch folder")
+				return false
+			var check := await _script_check_row(ctx, row, exe, env)
+			if _publish_cancelled(ctx):
+				return false
+			row["script_check"] = check
+			if check["ran"] and not check["ok"]:
+				row_failed = true
+		if row_failed:
 			failed.append(row["label"])
-			log_step_done(false, "%s" % _plural(script_errors.size(), "script error"))
-	_remove_dir_recursive(str(ctx["build_dir"]).path_join("smoke_home"))
+	_remove_dir_recursive(home)
 	if failed.is_empty():
 		return true
 	if ctx["strict"]:
-		log_line("Stopped before the upload: %s %s script errors or crashed when started (strict)." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_ERR)
+		log_line("Stopped before the upload: %s %s script errors, missing files or crashed when started. Nothing was uploaded." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_ERR)
 		_fail_publish(p, ctx["description"], "script errors")
 		return false
-	log_line("%s %s script errors or crashed when started. Going on with the upload; strict mode stops here instead." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_WARN)
+	log_line("%s %s script errors, missing files or crashed when started. Going on with the upload; strict mode stops here instead." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_WARN)
+	return true
+
+
+## Starts [param exe] headless with [param env] and stops it after
+## [param seconds]. Returns { lines, seconds, timed_out, exit_code } (-1
+## when it was stopped).
+func _run_headless(exe: String, env: Dictionary, seconds: float) -> Dictionary:
+	var lines: Array[String] = []
+	var collect := func(line: String, _is_stderr: bool, _tool: String) -> void:
+		lines.append(line)
+	child_output.connect(collect)
+	var state := {"running": true}
+	get_tree().create_timer(seconds).timeout.connect(func() -> void:
+		if state["running"] and _child_pid > 0:
+			_child_timed_out = true
+			_kill_child()
+	)
+	var started := Time.get_ticks_msec()
+	var code := await run_process(exe, PackedStringArray(["--headless", "--", "--godotpipe-smoke-test"]), "game", false, env)
+	var timed_out := _child_timed_out
+	state["running"] = false
+	child_output.disconnect(collect)
+	return {
+		"lines": lines,
+		"seconds": (Time.get_ticks_msec() - started) / 1000.0,
+		"timed_out": timed_out,
+		"exit_code": -1 if timed_out else code,
+	}
+
+
+## The script check of one exported [param row] (see ScriptCheck): copies
+## the build to a scratch folder, rewrites the copy's .pck with the checker
+## and starts it. Never touches the files that get uploaded. Returns
+## { ran, ok, reason, scripts, resources, skipped_plugins, script_errors,
+## broken, missing, errors, finished, exit_code, seconds }. "ran" is false
+## when the build could not be checked (logged as a warning, not a failure).
+func _script_check_row(ctx: Dictionary, row: Dictionary, exe: String, env: Dictionary) -> Dictionary:
+	var p: Dictionary = ctx["p"]
+	log_step("Loading every script of %s in a copy of the build" % row["label"])
+	var not_checked := func(reason: String) -> Dictionary:
+		log_line("%s was not checked: %s." % [row["label"], reason], COLOR_WARN)
+		log_step_done(true, "not checked")
+		return {"ran": false, "ok": true, "reason": reason}
+	var pck_path := _pck_of(exe)
+	if pck_path.is_empty():
+		return not_checked.call("its .pck is inside the executable (Embed PCK), which the check cannot read")
+	var pck := ScriptCheck.read_pck(pck_path)
+	if pck.has("error"):
+		return not_checked.call(pck["error"])
+	var lists := ScriptCheck.check_lists(pck["entries"], p["path"])
+	if not lists["plugin_dirs"].is_empty():
+		log_line("Editor plugins are left out (an exported game never runs them): %s" % ", ".join(lists["plugin_dirs"]), COLOR_INFO)
+
+	var row_dir: String = row["dir"]
+	var root := str(ctx["build_dir"]).path_join("script_check")
+	var copy_dir := root.path_join(row_dir.get_file())
+	_remove_dir_recursive(root)
+	if not _make_dir(copy_dir) or not _copy_tree(row_dir, copy_dir, pck_path):
+		_remove_dir_recursive(root)
+		return not_checked.call("the build could not be copied to %s" % copy_dir)
+	var copy_pck := copy_dir + pck_path.substr(row_dir.length())
+	var copy_exe := copy_dir + exe.substr(row_dir.length())
+	var thread := Thread.new()
+	thread.start(ScriptCheck.make_check_pck.bind(pck_path, pck, lists, copy_pck, root.path_join("unpacked")))
+	while thread.is_alive():
+		await get_tree().process_frame
+	var packed: String = thread.wait_to_finish()
+	_remove_dir_recursive(root.path_join("unpacked"))
+	if not packed.is_empty():
+		_remove_dir_recursive(root)
+		return not_checked.call(packed)
+	if _publish_cancelled(ctx):
+		_remove_dir_recursive(root)
+		return {"ran": false, "ok": true, "reason": "cancelled"}
+
+	var run := await _run_headless(copy_exe, env, SCRIPT_CHECK_TIMEOUT)
+	_remove_dir_recursive(root)
+	var found := ScriptCheck.findings(run["lines"])
+	var result := _smoke_findings(run["lines"])
+	var script_errors: Array[String] = []
+	script_errors.assign(result["script_errors"])
+	# Every broken script is named, also when Godot printed no error for it.
+	for path: String in found["broken"]:
+		var named := false
+		for line in script_errors:
+			if line.contains(path):
+				named = true
+				break
+		if not named:
+			script_errors.append("Failed to load script %s" % path)
+	result.merge({
+		"ran": true,
+		"scripts": lists["scripts"].size(),
+		"resources": lists["resources"].size(),
+		"skipped_plugins": lists["plugin_dirs"],
+		"script_errors": script_errors,
+		"broken": found["broken"],
+		"missing": found["missing"],
+		"finished": found["done"],
+		"exit_code": run["exit_code"],
+		"seconds": run["seconds"],
+	}, true)
+	for line in script_errors:
+		log_line(line, COLOR_ERR)
+	for line: String in found["missing"]:
+		log_line("Missing file: " + line, COLOR_ERR)
+	if not found["done"]:
+		var how := "did not finish within %ds" % int(SCRIPT_CHECK_TIMEOUT) if run["timed_out"] else "quit with exit code %d before it finished" % run["exit_code"]
+		log_line("The script check of %s %s." % [row["label"], how], COLOR_ERR)
+	result["ok"] = found["done"] and script_errors.is_empty() and found["missing"].is_empty()
+	if result["ok"]:
+		log_line("%s load and the files of %d scenes and resources are all there." % [_plural(result["scripts"], "script"), result["resources"]], COLOR_OK)
+		log_step_done(true)
+	else:
+		var notes := PackedStringArray()
+		if not script_errors.is_empty():
+			notes.append(_plural(script_errors.size(), "script error"))
+		if not found["missing"].is_empty():
+			notes.append(_plural(found["missing"].size(), "missing file"))
+		if not found["done"]:
+			notes.append("did not finish")
+		log_step_done(false, ", ".join(notes))
+	return result
+
+
+## The .pck an exported [param exe] loads: Contents/Resources/<name>.pck in a
+## macOS bundle, else <exe without extension>.pck next to it. "" when there
+## is none (the .pck is embedded in the executable).
+static func _pck_of(exe: String) -> String:
+	var path := exe.get_basename() + ".pck"
+	if exe.get_base_dir().ends_with("Contents/MacOS"):
+		path = exe.get_base_dir().get_base_dir().path_join("Resources").path_join(exe.get_file() + ".pck")
+	return path if FileAccess.file_exists(path) else ""
+
+
+## Copies the folder [param from] into [param to] (which exists), leaving out
+## the file [param skip]. Symlinks are copied as links; files keep their
+## permissions, so executables stay executable.
+func _copy_tree(from: String, to: String, skip: String) -> bool:
+	var dir := DirAccess.open(from)
+	if dir == null:
+		return false
+	dir.include_hidden = true
+	for f in dir.get_files():
+		var src := from.path_join(f)
+		if src == skip:
+			continue
+		if dir.is_link(src):
+			if dir.create_link(dir.read_link(src), to.path_join(f)) != OK:
+				return false
+		elif DirAccess.copy_absolute(src, to.path_join(f)) != OK:
+			return false
+		elif OS.get_name() != "Windows":
+			FileAccess.set_unix_permissions(to.path_join(f), FileAccess.get_unix_permissions(src))
+	for d in dir.get_directories():
+		var src := from.path_join(d)
+		if dir.is_link(src):
+			if dir.create_link(dir.read_link(src), to.path_join(d)) != OK:
+				return false
+		elif DirAccess.make_dir_absolute(to.path_join(d)) != OK or not _copy_tree(src, to.path_join(d), skip):
+			return false
 	return true
 
 
