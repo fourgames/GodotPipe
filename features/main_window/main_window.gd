@@ -1747,6 +1747,20 @@ static func _web_preset_uses_threads(project_path: String, preset_index: int) ->
 	return _as_bool(cfg.get_value("preset.%d.options" % preset_index, "variant/thread_support", false))
 
 
+## True when the preset named [param preset_name] in the project's
+## export_presets.cfg has the shader baker on.
+static func _preset_bakes_shaders(project_path: String, preset_name: String) -> bool:
+	var cfg := ConfigFile.new()
+	if cfg.load(project_path.path_join("export_presets.cfg")) != OK:
+		return false
+	var i := 0
+	while cfg.has_section("preset.%d" % i):
+		if str(cfg.get_value("preset.%d" % i, "name", "")) == preset_name:
+			return _as_bool(cfg.get_value("preset.%d.options" % i, "shader_baker/enabled", false))
+		i += 1
+	return false
+
+
 ## Steam's part of the check: App ID, branch, depot IDs and the SteamCMD login.
 func _validate_steam(p: Dictionary) -> bool:
 	var depots: Array = p["depots"]
@@ -3942,12 +3956,12 @@ func _export_rows(ctx: Dictionary) -> bool:
 		log_step("Exporting '%s' as %s → %s" % [row["preset"], out_path.get_file(), " and ".join(goes_to)])
 		var export_started := Time.get_ticks_msec()
 
-		var code := await run_process(godot, [
-			"--headless",
-			"--path", p["path"],
-			"--export-release", row["preset"],
-			out_path,
-		], KnownIssues.GODOT)
+		# Godot skips the shader baker in a headless export without a word, so a
+		# preset that bakes shaders exports with a window instead.
+		var export_args := PackedStringArray(["--path", p["path"], "--export-release", row["preset"], out_path])
+		if not _preset_bakes_shaders(p["path"], row["preset"]):
+			export_args.insert(0, "--headless")
+		var code := await run_process(godot, export_args, KnownIssues.GODOT)
 		if _publish_cancelled(ctx):
 			return false
 		if code != 0 or not FileAccess.file_exists(out_path):
