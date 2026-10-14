@@ -15,7 +15,7 @@ const EXIT_OK := 0
 const EXIT_USAGE := 1  # bad arguments, unknown app, internal error
 const EXIT_PREFLIGHT := 2  # the checks before the export, or a store's check
 const EXIT_EXPORT := 3
-const EXIT_SCRIPT_ERRORS := 4  # script errors or missing files in the exported build (--strict)
+const EXIT_SCRIPT_ERRORS := 4  # script or shader errors or missing files in the exported build (--strict)
 const EXIT_UPLOAD := 5
 const EXIT_AUTH := 6  # a sign-in, Steam Guard code or approval is needed
 
@@ -51,16 +51,18 @@ Options:
   --branch <name>       Set the build live on this beta branch (not default/public).
   --dry-run             publish: export and start the build, but upload nothing.
   --strict              publish: stop before uploading when an exported build
-                        has script errors or missing files, or crashed.
-  --smoke-seconds <n>   How long each exported build runs headless (default 15).
-                        The script check (every script loaded, every scene's
-                        and resource's files checked) runs as well.
+                        has script errors, shader errors or missing files,
+                        or crashed.
+  --smoke-seconds <n>   How long each exported build runs headless, and then
+                        with a renderer, in game time (default 15). The
+                        script check (every script loaded, every scene's and
+                        resource's files checked) runs as well.
   --no-smoke            Do not start the exported builds (no script check).
   --json                End with a one-line JSON summary on stdout.
   --log <file>          Write the full console here (default: user://cli_logs/).
 
 Exit codes: 0 ok, 1 usage, 2 pre-flight failed, 3 export failed,
-4 script errors or missing files in the exported build (--strict), 5 upload failed, 6 sign-in needed."""
+4 script or shader errors or missing files in the exported build (--strict), 5 upload failed, 6 sign-in needed."""
 
 var _w: MainWindow
 var _opts := {}
@@ -309,6 +311,9 @@ func _publish() -> void:
 		"strict": _opts.get("strict", false),
 		"script_check": mode != "check" and not _opts.get("no-smoke", false),
 		"all_or_nothing": true,
+		# The render run's last frame goes next to this run's log.
+		"frame_dir": _log_path.get_base_dir() if not _log_path.is_empty() else ProjectSettings.globalize_path(LOG_DIR),
+		"frame_prefix": _log_path.get_file().get_basename() if not _log_path.is_empty() else _command,
 	})
 	ctx["mode"] = mode
 	var summary := _summary(p, ctx)
@@ -445,6 +450,8 @@ func _row_summary(row: Dictionary) -> Dictionary:
 				out["size"] += size
 	if row.has("smoke"):
 		out["smoke"] = row["smoke"]
+	if row.has("render"):
+		out["render"] = row["render"]
 	if row.has("script_check"):
 		out["script_check"] = row["script_check"]
 	return out
@@ -520,12 +527,18 @@ func _open_log() -> void:
 	_log.store_line("%s %s · %s" % [MainWindow._app_name(), _command, " ".join(OS.get_cmdline_user_args())])
 
 
-## Keeps the newest KEEP_LOGS logs in [param dir].
+## Keeps the newest KEEP_LOGS logs in [param dir], with the frames their
+## render runs saved (<log name>_row<n>_<platform>.png).
 static func _prune_logs(dir: String) -> void:
-	var logs := Array(DirAccess.get_files_at(dir)).filter(func(f: String) -> bool: return f.ends_with(".log"))
+	var files := DirAccess.get_files_at(dir)
+	var logs := Array(files).filter(func(f: String) -> bool: return f.ends_with(".log"))
 	logs.sort()  # Names start with the date, so this is oldest first.
 	for i in maxi(0, logs.size() - KEEP_LOGS + 1):
 		DirAccess.remove_absolute(dir.path_join(logs[i]))
+		var stem: String = logs[i].get_basename() + "_"
+		for f in files:
+			if f.begins_with(stem) and f.ends_with(".png"):
+				DirAccess.remove_absolute(dir.path_join(f))
 
 
 ## One line on stdout and in the log file (with the time).

@@ -3535,7 +3535,11 @@ func _on_build_publish_pressed() -> void:
 ## - "mode": "publish" (the button), "check" (the checks and the store
 ##   checks, nothing exported) or "dry_run" (also exports, nothing uploaded).
 ## - "smoke_seconds": when above 0, every export this machine can run is
-##   started headless for that long and its script errors are collected.
+##   started headless for that long and its script errors are collected,
+##   then started again with a real renderer to catch shader errors and save
+##   a frame (see [method _render_run]).
+## - "frame_dir", "frame_prefix": where that frame is saved, as
+##   <frame_dir>/<frame_prefix>_row<n>_<platform>.png (default: user://logs and the time).
 ## - "script_check" (default true): every script of every export this
 ##   machine can run is loaded, and the files every scene and resource needs
 ##   are checked, in a copy of the build (see [method _smoke_test_rows]).
@@ -3558,6 +3562,8 @@ func build_and_publish(options := {}) -> Dictionary:
 	ctx["smoke_seconds"] = float(options.get("smoke_seconds", 0.0))
 	ctx["strict"] = bool(options.get("strict", false))
 	ctx["script_check"] = bool(options.get("script_check", true))
+	ctx["frame_dir"] = str(options.get("frame_dir", OS.get_user_data_dir().path_join("logs")))
+	ctx["frame_prefix"] = str(options.get("frame_prefix", Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")))
 	ctx["stage"] = "preflight"
 	if mode == "publish":
 		# The description works like a chat box: it is sent with this build and the
@@ -3995,6 +4001,31 @@ func _export_rows(ctx: Dictionary) -> bool:
 const SMOKE_SCRIPT_ERRORS: PackedStringArray = ["script error", "parse error", "failed to load script"]
 
 
+## Lines (lowercase) a Godot build prints when the renderer could not load or
+## compile a shader. The game runs, but draws wrong: Pomo Valley's baked Metal
+## shaders failed to load ("Not enough bytes for uniform in shader
+## container") and drew a house as a white shape and the people as nothing.
+## Only a run with a renderer prints them (see [method _render_run]).
+const SMOKE_RENDER_ERRORS: PackedStringArray = [
+	"failed to parse shader container",
+	"not enough bytes for uniform in shader container",
+	"shader.is_null()",
+	"shader error",
+	"shader compilation failed",
+	"error compiling shader",
+	"failed to compile shader",
+	"shader compile error",
+]
+
+
+## The render run (see [method _render_run]): frames a second of game time,
+## the window size it asks for, and the share of a frame's pixels one colour
+## may cover before the frame counts as blank.
+const RENDER_FPS := 4
+const RENDER_RESOLUTION := "640x360"
+const BLANK_FRAME_SHARE := 0.97
+
+
 ## How long the script check may take before it counts as hung.
 const SCRIPT_CHECK_TIMEOUT := 300.0
 
@@ -4007,12 +4038,14 @@ const SCRIPT_CHECK_TIMEOUT := 300.0
 ## - ctx["smoke_seconds"] above 0 (the command line's smoke test): starts the
 ##   build for that long and collects the script errors it prints into
 ##   row["smoke"] = { ran, reason, seconds, exit_code, crashed, script_errors,
-##   errors, timed_out }.
+##   render_errors, errors, timed_out }, then, where this machine can open
+##   a window, starts it again with a renderer (see [method _render_run])
+##   into row["render"].
 ## - ctx["script_check"]: loads every script and checks the dependencies of
 ##   every scene and resource in a copy of the build (see ScriptCheck and
 ##   [method _script_check_row]), into row["script_check"].
 ## Returns false when the run ended here: cancelled, or ctx["strict"] and a
-## build had script errors, missing files or crashed.
+## build had script errors, shader errors, missing files or crashed.
 func _smoke_test_rows(ctx: Dictionary) -> bool:
 	var p: Dictionary = ctx["p"]
 	var seconds: float = ctx["smoke_seconds"]
@@ -4057,16 +4090,32 @@ func _smoke_test_rows(ctx: Dictionary) -> bool:
 			result["crashed"] = not run["timed_out"] and run["exit_code"] != 0
 			row["smoke"] = result
 			var script_errors: Array = result["script_errors"]
-			for line: String in script_errors:
+			var render_errors: Array = result["render_errors"]
+			for line: String in script_errors + render_errors:
 				log_line(line, COLOR_ERR)
 			if result["crashed"]:
 				log_line("%s quit with exit code %d within %ds of starting." % [row["label"], run["exit_code"], int(seconds)], COLOR_ERR)
-			if script_errors.is_empty() and not result["crashed"]:
+			if script_errors.is_empty() and render_errors.is_empty() and not result["crashed"]:
 				log_line("No script errors%s." % ("" if run["timed_out"] else ", and it quit by itself"), COLOR_OK)
 				log_step_done(true, "%d other error lines" % result["errors"].size() if not result["errors"].is_empty() else "")
 			else:
 				row_failed = true
-				log_step_done(false, "%s" % _plural(script_errors.size(), "script error"))
+				log_step_done(false, "%s" % _plural(script_errors.size() + render_errors.size(), "error"))
+			var why_not := _render_unavailable()
+			if not why_not.is_empty():
+				row["render"] = {"ran": false, "reason": why_not}
+				log_line("%s was not started with a renderer: %s." % [row["label"], why_not], COLOR_INFO)
+			else:
+				_remove_dir_recursive(home)
+				if not _make_dir(home):
+					_fail_publish(p, ctx["description"], "no scratch folder")
+					return false
+				var render := await _render_run(ctx, row, exe, env, seconds)
+				if _publish_cancelled(ctx):
+					return false
+				row["render"] = render
+				if not render["ok"]:
+					row_failed = true
 		if ctx["script_check"]:
 			_remove_dir_recursive(home)
 			if not _make_dir(home):
@@ -4084,17 +4133,154 @@ func _smoke_test_rows(ctx: Dictionary) -> bool:
 	if failed.is_empty():
 		return true
 	if ctx["strict"]:
-		log_line("Stopped before the upload: %s %s script errors, missing files or crashed when started. Nothing was uploaded." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_ERR)
+		log_line("Stopped before the upload: %s %s script errors, shader errors, missing files or crashed when started. Nothing was uploaded." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_ERR)
 		_fail_publish(p, ctx["description"], "script errors")
 		return false
-	log_line("%s %s script errors, missing files or crashed when started. Going on with the upload; strict mode stops here instead." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_WARN)
+	log_line("%s %s script errors, shader errors, missing files or crashed when started. Going on with the upload; strict mode stops here instead." % [", ".join(failed), "has" if failed.size() == 1 else "have"], COLOR_WARN)
 	return true
+
+
+## Why exported builds cannot be started with a renderer here, or "" when
+## they can: macOS and Windows always have a desktop; Linux needs X11 or
+## Wayland (a server or CI runner usually has neither).
+static func _render_unavailable() -> String:
+	if OS.get_name() == "Linux" and OS.get_environment("DISPLAY").is_empty() and OS.get_environment("WAYLAND_DISPLAY").is_empty():
+		return "there is no display (DISPLAY and WAYLAND_DISPLAY are not set)"
+	return ""
+
+
+## The render run of one exported [param row]: the build's own renderer in a
+## small window, for [param seconds] of game time. The headless run never
+## draws, so it cannot see a shader that fails to load or compile; a build
+## with one runs fine and draws wrong. The game runs in Godot's Movie Maker
+## mode (--write-movie, a release template option): every frame is rendered
+## and written as a PNG, whether or not the window is in front, its audio
+## goes to a file instead of the speakers, and time steps a fixed
+## 1/RENDER_FPS s a frame, so --quit-after ends it after [param seconds] of
+## game time however slow the machine is. The window asks for a spot off the
+## screen; macOS keeps it in the top-left corner instead. On macOS
+## -NSAppSleepDisabled YES keeps App Nap from stopping a window in the
+## background from drawing. Shader errors (SMOKE_RENDER_ERRORS) fail the
+## row, as do script errors and a crash. The last frame is kept as
+## <frame_dir>/<frame_prefix>_row<n>_<platform>.png and flagged when one colour covers
+## almost all of it. Returns { ran, ok, seconds, timed_out, exit_code,
+## crashed, script_errors, render_errors, errors, frame }, frame being
+## { path, width, height, uniform_share, blank } or {} when none was drawn.
+func _render_run(ctx: Dictionary, row: Dictionary, exe: String, env: Dictionary, seconds: float) -> Dictionary:
+	log_step("Starting %s with a renderer for %ds of game time to catch shader errors" % [row["label"], int(seconds)])
+	var frames_dir := str(ctx["build_dir"]).path_join("smoke_frames")
+	_remove_dir_recursive(frames_dir)
+	_make_dir(frames_dir)
+	var frame_count := maxi(1, int(ceil(seconds * RENDER_FPS)))
+	var args := PackedStringArray()
+	if OS.get_name() == "macOS":
+		args.append_array(["-NSAppSleepDisabled", "YES"])
+	args.append_array([
+		"--windowed", "--resolution", RENDER_RESOLUTION, "--position", "-20000,-20000",
+		"--write-movie", frames_dir.path_join("frame.png"),
+		"--fixed-fps", str(RENDER_FPS), "--quit-after", str(frame_count),
+		"--", "--godotpipe-smoke-test",
+	])
+	# Loading and the first frames take real time; a build that is still not
+	# done after this hangs.
+	var limit := maxf(60.0, seconds * 4.0)
+	var run := await _run_build(exe, args, env, limit)
+	var result := _smoke_findings(run["lines"])
+	result["ran"] = true
+	result["seconds"] = run["seconds"]
+	result["timed_out"] = run["timed_out"]
+	result["exit_code"] = run["exit_code"]
+	result["crashed"] = not run["timed_out"] and run["exit_code"] != 0
+	result["frame"] = _keep_last_frame(frames_dir, str(ctx["frame_dir"]).path_join("%s_row%d_%s.png" % [ctx["frame_prefix"], int(row["index"]) + 1, row["kind"]]))
+	_remove_dir_recursive(frames_dir)
+	var script_errors: Array = result["script_errors"]
+	var render_errors: Array = result["render_errors"]
+	for line: String in script_errors + render_errors:
+		log_line(line, COLOR_ERR)
+	if result["crashed"]:
+		log_line("%s quit with exit code %d while rendering." % [row["label"], run["exit_code"]], COLOR_ERR)
+	if run["timed_out"]:
+		log_line("%s did not draw %d frames within %ds, so it was stopped." % [row["label"], frame_count, int(limit)], COLOR_WARN)
+	var frame: Dictionary = result["frame"]
+	if frame.is_empty():
+		log_line("%s drew no frame that could be saved." % row["label"], COLOR_WARN)
+	elif frame["blank"]:
+		log_line("The last frame is %d%% one colour, so the game may draw nothing: %s" % [roundi(frame["uniform_share"] * 100.0), frame["path"]], COLOR_WARN)
+	else:
+		log_line("Last frame: %s" % frame["path"], COLOR_INFO)
+	result["ok"] = script_errors.is_empty() and render_errors.is_empty() and not result["crashed"]
+	if result["ok"]:
+		log_line("No shader errors.", COLOR_OK)
+		log_step_done(true, "%d other error lines" % result["errors"].size() if not result["errors"].is_empty() else "")
+	else:
+		var notes := PackedStringArray()
+		if not render_errors.is_empty():
+			notes.append(_plural(render_errors.size(), "shader error"))
+		if not script_errors.is_empty():
+			notes.append(_plural(script_errors.size(), "script error"))
+		if result["crashed"]:
+			notes.append("crashed")
+		log_step_done(false, ", ".join(notes))
+	return result
+
+
+## Moves the last PNG Movie Maker wrote in [param frames_dir] to
+## [param to] and measures it. Returns { path, width, height, uniform_share,
+## blank }, uniform_share being the share of pixels in the commonest colour
+## (each channel cut to 4 bits, so dithering and noise still count as one);
+## {} when there is no frame.
+func _keep_last_frame(frames_dir: String, to: String) -> Dictionary:
+	var frames := Array(DirAccess.get_files_at(frames_dir)).filter(func(f: String) -> bool: return f.ends_with(".png"))
+	if frames.is_empty():
+		return {}
+	frames.sort()  # Movie Maker numbers them frame00000000.png, frame00000001.png, …
+	var image := Image.load_from_file(frames_dir.path_join(frames[-1]))
+	if image == null or image.is_empty():
+		return {}
+	DirAccess.make_dir_recursive_absolute(to.get_base_dir())
+	if image.save_png(to) != OK:
+		return {}
+	var share := _uniform_share(image)
+	return {
+		"path": to,
+		"width": image.get_width(),
+		"height": image.get_height(),
+		"uniform_share": snappedf(share, 0.001),
+		"blank": share >= BLANK_FRAME_SHARE,
+	}
+
+
+## Share of [param image]'s pixels that have its commonest colour, each
+## channel cut to 4 bits. Large frames are sampled on a grid.
+static func _uniform_share(image: Image) -> float:
+	var step := maxi(1, int(sqrt(image.get_width() * image.get_height() / 40000.0)))
+	var counts := {}
+	var total := 0
+	for y in range(0, image.get_height(), step):
+		for x in range(0, image.get_width(), step):
+			var c := image.get_pixel(x, y)
+			var key := (int(c.r * 15.0) << 8) | (int(c.g * 15.0) << 4) | int(c.b * 15.0)
+			counts[key] = counts.get(key, 0) + 1
+			total += 1
+	if total == 0:
+		return 1.0
+	var most := 0
+	for n: int in counts.values():
+		most = maxi(most, n)
+	return float(most) / total
 
 
 ## Starts [param exe] headless with [param env] and stops it after
 ## [param seconds]. Returns { lines, seconds, timed_out, exit_code } (-1
 ## when it was stopped).
 func _run_headless(exe: String, env: Dictionary, seconds: float) -> Dictionary:
+	return await _run_build(exe, PackedStringArray(["--headless", "--", "--godotpipe-smoke-test"]), env, seconds)
+
+
+## Starts [param exe] with [param args] and [param env] and stops it after
+## [param seconds]. Returns { lines, seconds, timed_out, exit_code } (-1
+## when it was stopped).
+func _run_build(exe: String, args: PackedStringArray, env: Dictionary, seconds: float) -> Dictionary:
 	var lines: Array[String] = []
 	var collect := func(line: String, _is_stderr: bool, _tool: String) -> void:
 		lines.append(line)
@@ -4106,7 +4292,7 @@ func _run_headless(exe: String, env: Dictionary, seconds: float) -> Dictionary:
 			_kill_child()
 	)
 	var started := Time.get_ticks_msec()
-	var code := await run_process(exe, PackedStringArray(["--headless", "--", "--godotpipe-smoke-test"]), "game", false, env)
+	var code := await run_process(exe, args, "game", false, env)
 	var timed_out := _child_timed_out
 	state["running"] = false
 	child_output.disconnect(collect)
@@ -4277,37 +4463,42 @@ func _runnable_export(row: Dictionary) -> String:
 	return ""
 
 
-## Script errors (see SMOKE_SCRIPT_ERRORS) and other ERROR lines in what an
-## exported build printed, each with the "at:" line Godot puts under it and
-## once, with " (×n)" when it was printed n times.
+## Script errors (see SMOKE_SCRIPT_ERRORS), shader errors (see
+## SMOKE_RENDER_ERRORS) and other ERROR lines in what an exported build
+## printed, each with the "at:" line Godot puts under it and once, with
+## " (×n)" when it was printed n times. The other ERROR lines (resources
+## still in use at exit, "Not supported by this display server") are only
+## reported.
 static func _smoke_findings(lines: Array[String]) -> Dictionary:
 	var script_errors: Array[String] = []
+	var render_errors: Array[String] = []
 	var errors: Array[String] = []
 	var counts := {}
 	for i in lines.size():
 		var line := lines[i].strip_edges()
 		var lower := line.to_lower()
-		var is_script := false
+		var kind := 0  # 0 other ERROR line, 1 script error, 2 shader error
 		for needle in SMOKE_SCRIPT_ERRORS:
 			if lower.contains(needle):
-				is_script = true
+				kind = 1
 				break
-		if not is_script and not lower.begins_with("error:"):
+		if kind == 0:
+			for needle in SMOKE_RENDER_ERRORS:
+				if lower.contains(needle):
+					kind = 2
+					break
+		if kind == 0 and not lower.begins_with("error:"):
 			continue
 		if i + 1 < lines.size() and lines[i + 1].strip_edges().begins_with("at:"):
 			line += " (%s)" % lines[i + 1].strip_edges()
 		counts[line] = counts.get(line, 0) + 1
-		if counts[line] > 1:
-			continue
-		if is_script:
-			script_errors.append(line)
-		else:
-			errors.append(line)
-	for list: Array[String] in [script_errors, errors]:
+		if counts[line] == 1:
+			[errors, script_errors, render_errors][kind].append(line)
+	for list: Array[String] in [script_errors, render_errors, errors]:
 		for j in list.size():
 			if counts[list[j]] > 1:
 				list[j] += " (×%d)" % counts[list[j]]
-	return {"script_errors": script_errors.slice(0, 100), "errors": errors.slice(0, 100)}
+	return {"script_errors": script_errors.slice(0, 100), "render_errors": render_errors.slice(0, 100), "errors": errors.slice(0, 100)}
 
 
 ## Build & Publish step 2 for Steam: writes the build script and uploads with
