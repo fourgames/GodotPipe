@@ -346,6 +346,12 @@ const PASSWORD_PROMPT := "password:"
 ## SecretStore names of the remembered secrets.
 const SECRET_PASSWORD := "steam_password"
 const SECRET_SHARED_SECRET := "steam_shared_secret"
+## Steam Guard code field texts while no shared secret generates the code
+## (kept in sync with main_window.tscn).
+const GUARD_PLACEHOLDER := "Code from the Steam mobile app or email"
+const GUARD_TOOLTIP := "Type the code from the Steam mobile app or your email before Sign in to skip the phone approval. Leave empty to approve on your phone."
+## Ticks once a second while a shared secret generates the Guard code.
+var _guard_code_timer: Timer
 const SECRET_ITCH_KEY := "itch_api_key"
 ## Prompts SteamCMD prints (without a trailing newline) when it needs a code.
 const GUARD_PROMPTS := ["steam guard code:", "two-factor code:", "enter the current code"]
@@ -579,6 +585,18 @@ func _ready() -> void:
 	)
 	_bind_secret_toggle(%TogglePasswordVisible, %SteamPassword, "password")
 	_bind_secret_toggle(%ToggleSecretVisible, %SteamSharedSecret, "shared secret")
+	%ToggleGuardCodeVisible.toggled.connect(func(on: bool) -> void:
+		%ToggleGuardCodeVisible.icon = EYE_VISIBLE if on else EYE_HIDDEN
+		%ToggleGuardCodeVisible.tooltip_text = ("Hide" if on else "Show") + " Steam Guard code"
+		_refresh_generated_guard_code()
+	)
+	%CopyGuardCode.pressed.connect(_copy_guard_code)
+	_guard_code_timer = Timer.new()
+	_guard_code_timer.wait_time = 1.0
+	_guard_code_timer.paused = true
+	_guard_code_timer.timeout.connect(_refresh_generated_guard_code)
+	add_child(_guard_code_timer)
+	_guard_code_timer.start()
 
 	%ButlerBinary.text_changed.connect(func(_t: String) -> void:
 		_save_settings()
@@ -4896,11 +4914,58 @@ func _steam_login_args() -> PackedStringArray:
 	return args
 
 
-## Marks the shared secret red while it cannot produce a code. The code itself
-## is never shown: a live 2FA code leaks in screenshots and screen shares.
+## Marks the shared secret red while it cannot produce a code, and switches
+## the Steam Guard code field to show the generated code while it can.
 func _check_shared_secret() -> void:
 	var secret: String = %SteamSharedSecret.text
 	_set_field_error(%SteamSharedSecret, not secret.strip_edges().is_empty() and steam_totp(secret).is_empty())
+	_refresh_generated_guard_code()
+
+
+## With a valid shared secret the Steam Guard code field is read-only and its
+## placeholder shows the generated code and the seconds until the next one.
+## The code is masked until the eye button is pressed (a live 2FA code leaks in
+## screenshots and screen shares). The field's text stays empty, so the
+## sign-in logic still treats it as "no typed code" and uses the secret.
+func _refresh_generated_guard_code() -> void:
+	var field: LineEdit = %SteamGuardCode
+	var secret: String = %SteamSharedSecret.text
+	var code := steam_totp(secret) if not secret.strip_edges().is_empty() else ""
+	var generated := not code.is_empty()
+	%ToggleGuardCodeVisible.visible = generated
+	%CopyGuardCode.visible = generated
+	if _guard_code_timer != null:
+		_guard_code_timer.paused = not generated
+	if not generated:
+		if not field.editable:
+			field.editable = true
+			field.placeholder_text = GUARD_PLACEHOLDER
+			field.tooltip_text = GUARD_TOOLTIP
+			field.remove_theme_color_override("font_placeholder_color")
+			%ToggleGuardCodeVisible.button_pressed = false
+		return
+	if field.editable:
+		field.text = ""
+		field.editable = false
+		field.tooltip_text = "Generated from the shared secret. Press the eye to show it, or copy it to sign in elsewhere. Clear the shared secret to type a code yourself."
+		field.add_theme_color_override("font_placeholder_color", field.get_theme_color("font_color"))
+	var left := 30 - int(Time.get_unix_time_from_system()) % 30
+	var shown := code if %ToggleGuardCodeVisible.button_pressed else "•••••"
+	field.placeholder_text = "%s  ·  new code in %ds" % [shown, left]
+
+
+func _copy_guard_code() -> void:
+	var code := steam_totp(%SteamSharedSecret.text)
+	if code.is_empty():
+		return
+	DisplayServer.clipboard_set(code)
+	var button: Button = %CopyGuardCode
+	button.icon = ICON_CHECK
+	button.tooltip_text = "Copied"
+	await get_tree().create_timer(1.0).timeout
+	if is_instance_valid(button):
+		button.icon = ICON_COPY
+		button.tooltip_text = "Copy the generated Steam Guard code"
 
 
 func _on_steam_login_pressed() -> void:

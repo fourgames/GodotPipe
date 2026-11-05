@@ -1007,6 +1007,29 @@ tooltip_text = "Type the code from the Steam mobile app or your email before Sig
 placeholder_text = "Code from the Steam mobile app or email"
 max_length = 8
 
+[node name="ToggleGuardCodeVisible" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/SetupPage/AccountSection/AccountCard/AccountRows/GuardRow" unique_id=1264093857]
+unique_name_in_owner = true
+visible = false
+custom_minimum_size = Vector2(24, 24)
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Show Steam Guard code"
+theme_type_variation = &"IconButton"
+toggle_mode = true
+icon = ExtResource("5_eye_closed")
+icon_alignment = 1
+
+[node name="CopyGuardCode" type="Button" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/SetupPage/AccountSection/AccountCard/AccountRows/GuardRow" unique_id=1739204816]
+unique_name_in_owner = true
+visible = false
+custom_minimum_size = Vector2(24, 24)
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Copy the generated Steam Guard code"
+theme_type_variation = &"IconButton"
+icon = ExtResource("24_action_copy")
+icon_alignment = 1
+
 [node name="SecretRow" type="HBoxContainer" parent="Layout/Content/MainView/ScrollFrame/UpperScroll/ContentMargin/UpperLayout/SetupPage/AccountSection/AccountCard/AccountRows" unique_id=776776488]
 layout_mode = 2
 theme_override_constants/separation = 8
