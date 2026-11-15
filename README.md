@@ -7,6 +7,8 @@
 
 Desktop app that exports a Godot project and uploads the build to itch.io with butler, to Steam with SteamCMD, or to both in one go.
 
+**Works from the command line too.** Everything the window does also runs headless, so scripts and AI agents can drive it: add a new game (App ID, depots, executables, export presets), check it, build and publish it. The one step that may need the window is the first Steam sign-in, since Steam Guard asks for a code or an approval in the mobile app. After that SteamCMD reuses its cached session. With a shared secret remembered, the command line makes the codes itself and needs no window at all. See [Command line](#command-line).
+
 ## Getting started
 
 The **Setup** page in the sidebar holds the tools and accounts shared by every app, one pair per store:
