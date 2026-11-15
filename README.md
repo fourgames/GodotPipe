@@ -77,11 +77,12 @@ godot --headless --path ~/Documents/github/GodotPipe -- publish --project "Diggi
 | `list` | The Setup page state (SteamCMD, butler, signed in or not) and every app: stores, App ID, branch, itch.io game, build rows (preset, executable, depot, channel) and the project's export presets. |
 | `check --project <app>` | Everything Build & Publish checks before it exports, including the store checks: SteamCMD signs in and reads the app's depots and branches, butler reads the itch.io game. Nothing is exported or uploaded. |
 | `publish --project <app>` | Build & Publish: export every row, start the exported build (see below), upload. |
+| `add --app <id> --project <folder>` | Adds a Godot game as a Steam app without the window (see below). |
 | `help` | Usage. |
 
 Options:
 
-- `--project <app>`: the app's `project.godot`, its folder, its name (or a unique part of it) or its Steam App ID. The app has to be added in the window first; that is where its App ID, depots and channels live.
+- `--project <app>`: the app's `project.godot`, its folder, its name (or a unique part of it) or its Steam App ID. The app has to be added first, with + in the window or the `add` command; that is where its App ID, depots and channels live.
 - `--stores steam,itch`: publish to these stores in this run (default: the stores ticked for the app).
 - `--desc <text>`: the Steam build description. For an app that only goes to itch.io it is the version itch.io shows (the default is the project's `application/config/version`).
 - `--branch <name>`: set the build live on this beta branch after the upload (SteamPipe's `SetLive`). `default` and `public` are refused, see below.
@@ -91,7 +92,9 @@ Options:
 - `--json`: end with a one-line JSON summary as the last line on stdout.
 - `--log <file>`: where the full console goes. By default each run writes `user://cli_logs/<date>_<command>.log` (on macOS `~/Library/Application Support/GodotPipe/cli_logs/`); the newest 50 are kept.
 
-Nothing a run does is saved: the overrides apply to that run only, and `projects.cfg`, `settings.cfg` and the credential store are left as they are. Secrets are never printed; the console masks them as in the window.
+**Adding an app.** `add --app 5629700 --project ~/Documents/GitHub/Deadstop --json` fills in the app as + in the window and the depot table would: the name from `config/name` in `project.godot`, Steam on, an installed Godot matching the project's version, and one row per desktop platform (Windows, macOS, Linux) with depot App ID + 1, + 2, + 3 and the name without spaces or symbols as the executable (`Deadstop.exe`, `Deadstop.app`, `Deadstop.x86_64`). A platform with no export preset gets one appended to the game's `export_presets.cfg`, with the filters of its first preset (macOS: universal, bundle ID `com.example.<name>`, not code-signed; the rest of the file is left as it was). An App ID that is already added is refused; `--update` replaces that app's settings and rows instead. Overrides: `--name`, `--output`, `--platforms windows,macos,linux`, `--windows-depot`, `--macos-depot`, `--linux-depot`, `--godot`, `--branch`, `--bundle-id`, `--no-presets`. Unlike the other commands it saves `projects.cfg`, so close the GodotPipe window first (or reopen it afterwards), or the window's next save drops the new app.
+
+Nothing the other commands do is saved: the overrides apply to that run only, and `projects.cfg`, `settings.cfg` and the credential store are left as they are. Secrets are never printed; the console masks them as in the window.
 
 **Signing in.** The command line uses the cached SteamCMD session, the remembered password and shared secret, and the remembered itch.io API key, like the window. It cannot answer prompts: when SteamCMD asks for a Steam Guard code (and no shared secret is set), waits for approval in the Steam mobile app, or asks for a password that is not remembered, the run stops with exit code 6 instead of waiting. Sign in once in the window (Setup page → **Sign in**); SteamCMD caches the session and later runs use it.
 

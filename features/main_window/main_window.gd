@@ -7236,8 +7236,9 @@ func _read_project_name(dir: String) -> String:
 	return dir.get_file()
 
 
-func _save_projects() -> void:
-	if cli_mode:
+## [param even_in_cli]: the command line's add command, which exists to save.
+func _save_projects(even_in_cli := false) -> void:
+	if cli_mode and not even_in_cli:
 		return  # Overrides from the command line apply to one run only.
 	var cfg := ConfigFile.new()
 	for i in _projects.size():

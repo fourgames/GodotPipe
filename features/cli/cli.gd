@@ -8,7 +8,8 @@ extends Node
 ## export, SteamCMD and butler runs as the Build & Publish button) with the
 ## apps and sign-ins the window saved, prints the console as plain text,
 ## writes it to a log file and optionally ends with a one-line JSON summary.
-## Nothing is saved back: overrides such as --branch apply to this run only.
+## Nothing is saved back (overrides such as --branch apply to this run only),
+## except by the add command, which exists to add an app to projects.cfg.
 ## See README.md, "Command line".
 
 const EXIT_OK := 0
@@ -41,6 +42,11 @@ Commands:
                             the store checks (SteamCMD sign-in, depot IDs, branch; butler).
                             Nothing is exported or uploaded.
   publish --project <app>   Build & Publish: export, start the build, upload.
+  add --app <id> --project <folder>
+                            Adds a Godot game as a Steam app, as + in the window
+                            would, with one row per desktop platform. Export
+                            presets missing for those platforms are added to
+                            the game's export_presets.cfg. Saved to projects.cfg.
   help                      This text.
 
 Options:
@@ -59,10 +65,36 @@ Options:
                         resource's files checked) runs as well.
   --no-smoke            Do not start the exported builds (no script check).
   --json                End with a one-line JSON summary on stdout.
+
+add options (all but --app and --project default as described):
+  --app <id>            Steam App ID. Refused when an app has it, unless --update.
+  --project <folder>    The game's folder or its project.godot.
+  --update              Replace the app with this App ID (keeps its build folder,
+                        branch, description and itch.io settings).
+  --name <text>         Default: config/name in project.godot.
+  --output <name>       Executable base name. Default: the name without spaces
+                        or other symbols (Deadstop → Deadstop.exe/.app/.x86_64).
+  --platforms <list>    windows,macos,linux (default: all three, in that order).
+  --windows-depot <id>  Default: App ID + 1.
+  --macos-depot <id>    Default: App ID + 2.
+  --linux-depot <id>    Default: App ID + 3.
+  --godot <binary>      Default: an installed Godot matching the project's version.
+  --branch <name>       Beta branch to set builds live on (default: none).
+  --bundle-id <id>      macOS bundle identifier for a macOS preset that is
+                        created (default: com.example.<name>).
+  --no-presets          Do not add missing export presets.
   --log <file>          Write the full console here (default: user://cli_logs/).
 
 Exit codes: 0 ok, 1 usage, 2 pre-flight failed, 3 export failed,
 4 script or shader errors or missing files in the exported build (--strict), 5 upload failed, 6 sign-in needed."""
+
+## The rows add creates: platform, export_presets.cfg platform name, depot
+## offset from the App ID and the file extension of the export path.
+const ADD_PLATFORMS := {
+	"windows": {"platform": "Windows Desktop", "offset": 1, "ext": ".exe"},
+	"macos": {"platform": "macOS", "offset": 2, "ext": ".zip"},
+	"linux": {"platform": "Linux", "offset": 3, "ext": ".x86_64"},
+}
 
 var _w: MainWindow
 var _opts := {}
@@ -99,6 +131,9 @@ func run(window: MainWindow, args: PackedStringArray) -> void:
 			_list()
 		"check", "publish":
 			await _publish()
+		"add", "add-game":
+			_command = "add"
+			await _add()
 		_:
 			_say("error: unknown command '%s'." % _command)
 			_say(USAGE)
@@ -111,8 +146,10 @@ func run(window: MainWindow, args: PackedStringArray) -> void:
 
 ## Fills _command and _opts; returns an error message or "".
 func _parse(args: PackedStringArray) -> String:
-	var flags := ["--dry-run", "--strict", "--no-smoke", "--json"]
-	var valued := ["--project", "--stores", "--desc", "--branch", "--smoke-seconds", "--log"]
+	var flags := ["--dry-run", "--strict", "--no-smoke", "--json", "--update", "--no-presets"]
+	var valued := ["--project", "--stores", "--desc", "--branch", "--smoke-seconds", "--log",
+		"--app", "--name", "--output", "--platforms", "--windows-depot", "--macos-depot",
+		"--linux-depot", "--godot", "--bundle-id"]
 	var i := 0
 	while i < args.size():
 		var arg := args[i]
@@ -144,6 +181,17 @@ func _parse(args: PackedStringArray) -> String:
 		_command = "help"
 	if _command in ["check", "publish"] and str(_opts.get("project", "")).strip_edges().is_empty():
 		return "%s needs --project <app>." % _command
+	if _command in ["add", "add-game"]:
+		if str(_opts.get("project", "")).strip_edges().is_empty():
+			return "add needs --project <the game's folder>."
+		if not _is_id(str(_opts.get("app", ""))):
+			return "add needs --app <Steam App ID> (digits)."
+		for key in ["windows-depot", "macos-depot", "linux-depot"]:
+			if _opts.has(key) and not _is_id(str(_opts[key])):
+				return "--%s needs a depot ID (digits)." % key
+		for kind in str(_opts.get("platforms", "windows")).split(",", false):
+			if not kind.strip_edges().to_lower() in ADD_PLATFORMS:
+				return "--platforms takes windows, macos and linux, not '%s'." % kind
 	if _opts.has("smoke-seconds") and not str(_opts["smoke-seconds"]).is_valid_float():
 		return "--smoke-seconds needs a number."
 	if _opts.has("stores"):
@@ -219,41 +267,9 @@ func _list() -> void:
 	var apps: Array[Dictionary] = []
 	for p in w._projects:
 		var folder := w._is_folder_app(p)
-		var presets: Array[Dictionary] = []
-		if not folder:
-			w._read_presets(p["path"])
-			for i in w._preset_names.size():
-				presets.append({"name": w._preset_names[i], "platform": w._preset_platforms[i], "kind": w._platform_kind(i)})
-		var rows: Array[Dictionary] = []
-		for i in p["depots"].size():
-			var d: Dictionary = p["depots"][i]
-			var kind := w._row_kind(p, d)
-			var row := {
-				"row": i + 1,
-				"depot_id": str(d.get("depot_id", "")).strip_edges(),
-				"itch_channel": str(d.get("itch_channel", "")).strip_edges(),
-			}
-			if folder:
-				row["folder"] = str(d.get("content_dir", ""))
-			else:
-				row["preset"] = str(d.get("preset", ""))
-				row["platform"] = kind
-				row["executable"] = "index.html" if kind == "web" else str(d.get("output", "")).strip_edges() + w._shown_extension(kind)
-			rows.append(row)
-		var app := {
-			"name": p["name"],
-			"path": p["path"],
-			"kind": p["kind"],
-			"godot_binary": p.get("godot_binary", ""),
-			"version": "" if folder else w._read_project_version(p["path"]),
-			"steam": MainWindow._steam_on(p),
-			"app_id": str(p.get("app_id", "")).strip_edges(),
-			"branch": w._branch_name(p),
-			"itch": MainWindow._itch_on(p),
-			"itch_target": str(p.get("itch_target", "")).strip_edges(),
-			"rows": rows,
-			"presets": presets,
-		}
+		var app := _app_summary(p)
+		var rows: Array[Dictionary] = app["rows"]
+		var presets: Array[Dictionary] = app["presets"]
 		apps.append(app)
 		_say("")
 		_say("%s  (%s)" % [app["name"], app["path"]])
@@ -274,6 +290,253 @@ func _list() -> void:
 		_say("")
 		_say("No apps yet. Add one with + in the GodotPipe window.")
 	_finish(EXIT_OK, {"setup": setup, "apps": apps})
+
+
+## What list reports for app [param p]: stores, rows and the project's presets.
+func _app_summary(p: Dictionary) -> Dictionary:
+	var w := _w
+	var folder := w._is_folder_app(p)
+	var presets: Array[Dictionary] = []
+	if not folder:
+		w._read_presets(p["path"])
+		for i in w._preset_names.size():
+			presets.append({"name": w._preset_names[i], "platform": w._preset_platforms[i], "kind": w._platform_kind(i)})
+	var rows: Array[Dictionary] = []
+	for i in p["depots"].size():
+		var d: Dictionary = p["depots"][i]
+		var kind := w._row_kind(p, d)
+		var row := {
+			"row": i + 1,
+			"depot_id": str(d.get("depot_id", "")).strip_edges(),
+			"itch_channel": str(d.get("itch_channel", "")).strip_edges(),
+		}
+		if folder:
+			row["folder"] = str(d.get("content_dir", ""))
+		else:
+			row["preset"] = str(d.get("preset", ""))
+			row["platform"] = kind
+			row["executable"] = "index.html" if kind == "web" else str(d.get("output", "")).strip_edges() + w._shown_extension(kind)
+		rows.append(row)
+	var app := {
+		"name": p["name"],
+		"path": p["path"],
+		"kind": p["kind"],
+		"godot_binary": p.get("godot_binary", ""),
+		"version": "" if folder else w._read_project_version(p["path"]),
+		"steam": MainWindow._steam_on(p),
+		"app_id": str(p.get("app_id", "")).strip_edges(),
+		"branch": w._branch_name(p),
+		"itch": MainWindow._itch_on(p),
+		"itch_target": str(p.get("itch_target", "")).strip_edges(),
+		"rows": rows,
+		"presets": presets,
+	}
+	return app
+
+
+## Adds (or with --update replaces) a Godot game as a Steam app, filled in as
+## the window's + button and depot table would: name from project.godot, one
+## row per platform with depot App ID + 1/2/3 and the name without symbols as
+## the executable. Saved to projects.cfg, unlike every other command.
+func _add() -> void:
+	var w := _w
+	var app_id := str(_opts["app"]).strip_edges()
+	var dir := str(_opts["project"]).strip_edges()
+	if dir.begins_with("~"):
+		dir = MainWindow._home_dir() + dir.substr(1)
+	if dir.get_file() == "project.godot":
+		dir = dir.get_base_dir()
+	if dir.is_relative_path():
+		dir = OS.get_environment("PWD").path_join(dir)
+	dir = dir.simplify_path().trim_suffix("/")
+	if not FileAccess.file_exists(dir.path_join("project.godot")):
+		_say("error: no project.godot in %s." % dir)
+		_finish(EXIT_USAGE, {})
+		return
+	var existing := -1
+	for i in w._projects.size():
+		if str(w._projects[i].get("app_id", "")).strip_edges() == app_id:
+			existing = i
+			break
+	if existing >= 0 and not _opts.get("update", false):
+		_say("error: App %s is already in GodotPipe as '%s' (%s). Pass --update to replace it." % [app_id, w._projects[existing]["name"], w._projects[existing]["path"]])
+		_finish(EXIT_USAGE, {"app": _app_summary(w._projects[existing])})
+		return
+	var same_folder := w._project_index_for_path(dir)
+	if same_folder >= 0 and same_folder != existing:
+		_message("warning", "'%s' already uses %s. Both entries upload separately, which is right for a demo or playtest with its own App ID." % [w._projects[same_folder]["name"], dir])
+
+	var game_name := str(_opts.get("name", "")).strip_edges()
+	if game_name.is_empty():
+		game_name = w._read_project_name(dir)
+	var output := str(_opts.get("output", "")).strip_edges()
+	if output.is_empty():
+		output = RegEx.create_from_string("[^A-Za-z0-9_-]").sub(game_name, "", true)
+		if output.is_empty():
+			output = "game"
+	output = w._strip_known_extension(output)
+	var kinds := PackedStringArray()
+	for kind in str(_opts.get("platforms", "windows,macos,linux")).split(",", false):
+		kind = kind.strip_edges().to_lower()
+		if not kind in kinds:
+			kinds.append(kind)
+
+	var binary := str(_opts.get("godot", "")).strip_edges()
+	if binary.is_empty() and existing >= 0:
+		binary = str(w._projects[existing].get("godot_binary", ""))
+	if binary.is_empty():
+		var required := w._read_required_godot_version(dir)
+		_say("Looking for an installed Godot %s…" % required)
+		binary = await w._guess_godot_binary(required)
+		if binary.is_empty():
+			_message("warning", "No installed Godot matches the project's version %s. Set the Godot binary in the window, or pass --godot." % required)
+
+	var created := PackedStringArray()
+	if not _opts.get("no-presets", false):
+		var result: Variant = _add_missing_presets(dir, kinds, game_name, output)
+		if result == null:
+			_finish(EXIT_USAGE, {})
+			return
+		created = result
+	w._read_presets(dir)
+
+	var p: Dictionary
+	if existing >= 0:
+		p = w._projects[existing]
+		p["path"] = dir
+		p["name"] = game_name
+		p["kind"] = "godot"
+		p["godot_binary"] = binary
+	else:
+		p = w._new_project(dir, "godot", binary)
+		p["name"] = game_name
+		p["itch_enabled"] = false  # No itch.io game is known; tick it in the window.
+	p["steam_enabled"] = true
+	p["app_id"] = app_id
+	if _opts.has("branch"):
+		p["branch"] = str(_opts["branch"]).strip_edges()
+	var old_rows: Array = p.get("depots", [])
+	var rows: Array = []
+	var taken := PackedStringArray()
+	for kind in kinds:
+		var info: Dictionary = ADD_PLATFORMS[kind]
+		var at := w._preset_platforms.find(info["platform"])
+		var preset: String = w._preset_names[at] if at >= 0 else info["platform"]
+		if at < 0:
+			_message("warning", "%s has no %s export preset. Add one in Godot → Project → Export…, named '%s'." % [dir.path_join("export_presets.cfg"), info["platform"], preset])
+		var depot := str(_opts.get(kind + "-depot", str(int(app_id) + int(info["offset"])))).strip_edges()
+		var channel := ""
+		for old: Dictionary in old_rows:
+			if str(old.get("preset", "")) == preset:
+				channel = str(old.get("itch_channel", "")).strip_edges()
+		if channel.is_empty() or channel in taken:
+			channel = ButlerTool.default_channel(kind, taken)
+		taken.append(channel)
+		rows.append({"depot_id": depot, "itch_channel": channel, "output": output, "preset": preset})
+	p["depots"] = rows
+	if existing < 0:
+		w._projects.insert(0, p)  # New apps go on top, as in the window.
+	w._save_projects(true)
+
+	_say("%s '%s' (App %s, %s)" % ["Updated" if existing >= 0 else "Added", game_name, app_id, dir])
+	for preset in created:
+		_say("  Added the %s export preset to %s" % [preset, dir.path_join("export_presets.cfg")])
+	var app := _app_summary(p)
+	for row: Dictionary in app["rows"]:
+		_say("  Row %d: %s → %s · depot %s" % [row["row"], row["preset"], row["executable"], row["depot_id"]])
+	_say("  Godot: %s" % (binary if not binary.is_empty() else "not found"))
+	_say("Close and reopen the GodotPipe window if it is open, or its next save drops this change.")
+	_finish(EXIT_OK, {"added": existing < 0, "updated": existing >= 0, "presets_created": created, "app": app})
+
+
+## Appends a preset for each platform in [param kinds] that
+## [param dir]/export_presets.cfg has none for, copying the filters of the
+## file's first preset, and leaves the rest of the file untouched. Returns the
+## names added, or null (reason said) when the file cannot be read or written.
+func _add_missing_presets(dir: String, kinds: PackedStringArray, game_name: String, output: String) -> Variant:
+	var path := dir.path_join("export_presets.cfg")
+	var cfg := ConfigFile.new()
+	var text := ""
+	if FileAccess.file_exists(path):
+		text = FileAccess.get_file_as_string(path)
+		if cfg.parse(text) != OK:
+			_say("error: %s cannot be read; fix it in Godot first." % path)
+			return null
+	var count := 0
+	var platforms := PackedStringArray()
+	while cfg.has_section("preset.%d" % count):
+		platforms.append(str(cfg.get_value("preset.%d" % count, "platform", "")))
+		count += 1
+	var template := "preset.0" if count > 0 else ""
+	var export_dir := "export"
+	if not template.is_empty():
+		var old_path := str(cfg.get_value(template, "export_path", ""))
+		if old_path.contains("/"):
+			export_dir = old_path.get_base_dir()
+	var bundle := str(_opts.get("bundle-id", "")).strip_edges()
+	if bundle.is_empty():
+		bundle = "com.example." + output.to_lower().replace("_", "-")
+	var add := ConfigFile.new()
+	var created := PackedStringArray()
+	for kind in kinds:
+		var info: Dictionary = ADD_PLATFORMS[kind]
+		if info["platform"] in platforms:
+			continue
+		var s := "preset.%d" % count
+		var o := s + ".options"
+		count += 1
+		add.set_value(s, "name", info["platform"])
+		add.set_value(s, "platform", info["platform"])
+		add.set_value(s, "dedicated_server", false)
+		for key in ["custom_features", "include_filter", "exclude_filter"]:
+			add.set_value(s, key, str(cfg.get_value(template, key, "")) if not template.is_empty() else "")
+		add.set_value(s, "export_filter", str(cfg.get_value(template, "export_filter", "all_resources")) if not template.is_empty() else "all_resources")
+		add.set_value(s, "export_path", export_dir.path_join(output + info["ext"]))
+		add.set_value(s, "script_export_mode", int(cfg.get_value(template, "script_export_mode", 2)) if not template.is_empty() else 2)
+		match kind:
+			"windows":
+				add.set_value(o, "binary_format/embed_pck", false)
+				add.set_value(o, "binary_format/architecture", "x86_64")
+				add.set_value(o, "texture_format/s3tc_bptc", true)
+				add.set_value(o, "texture_format/etc2_astc", false)
+				add.set_value(o, "application/product_name", game_name)
+			"macos":
+				add.set_value(o, "export/distribution_type", 1)
+				add.set_value(o, "binary_format/architecture", "universal")
+				add.set_value(o, "application/bundle_identifier", bundle)
+				add.set_value(o, "application/app_category", "Games")
+				add.set_value(o, "display/high_res", true)
+				add.set_value(o, "codesign/codesign", 0)
+			"linux":
+				add.set_value(o, "binary_format/embed_pck", false)
+				add.set_value(o, "binary_format/architecture", "x86_64")
+				add.set_value(o, "texture_format/s3tc_bptc", true)
+				add.set_value(o, "texture_format/etc2_astc", false)
+		var template_options := template + ".options"
+		if not template.is_empty() and cfg.has_section_key(template_options, "shader_baker/enabled"):
+			add.set_value(o, "shader_baker/enabled", cfg.get_value(template_options, "shader_baker/enabled"))
+		created.append(info["platform"])
+	if created.is_empty():
+		return created
+	var out := text.strip_edges(false, true)
+	out += ("\n\n" if not out.is_empty() else "") + add.encode_to_text().strip_edges() + "\n"
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		_say("error: cannot write %s (%s)." % [path, error_string(FileAccess.get_open_error())])
+		return null
+	f.store_string(out)
+	f.close()
+	return created
+
+
+func _message(level: String, text: String) -> void:
+	_say("%s: %s" % [level, text])
+	_messages.append({"level": level, "text": text})
+
+
+static func _is_id(text: String) -> bool:
+	text = text.strip_edges()
+	return text.is_valid_int() and int(text) > 0
 
 
 func _publish() -> void:
