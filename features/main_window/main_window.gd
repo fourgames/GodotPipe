@@ -3580,6 +3580,9 @@ func build_and_publish(options := {}) -> Dictionary:
 	ctx["smoke_seconds"] = float(options.get("smoke_seconds", 0.0))
 	ctx["strict"] = bool(options.get("strict", false))
 	ctx["script_check"] = bool(options.get("script_check", true))
+	# Builds already exported into the rows' folders (e.g. on another machine):
+	# skip the Godot export, still unpack, test and upload them.
+	ctx["prebuilt"] = bool(options.get("prebuilt", false))
 	ctx["frame_dir"] = str(options.get("frame_dir", OS.get_user_data_dir().path_join("logs")))
 	ctx["frame_prefix"] = str(options.get("frame_prefix", Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")))
 	ctx["stage"] = "preflight"
@@ -3935,7 +3938,8 @@ func _export_rows(ctx: Dictionary) -> bool:
 	var build_dir: String = ctx["build_dir"]
 	var content_root := build_dir.path_join("content")
 	var folder: bool = ctx["folder"]
-	if not folder and not _remove_dir_recursive(content_root):
+	var prebuilt: bool = ctx.get("prebuilt", false)
+	if not folder and not prebuilt and not _remove_dir_recursive(content_root):
 		log_line("Could not delete the previous build in %s, so a file in it is still in use. Close any copy of the game started from that folder (and any window showing it), then build again." % content_root, COLOR_ERR)
 		_fail_publish(p, description)
 		return false
@@ -3946,7 +3950,7 @@ func _export_rows(ctx: Dictionary) -> bool:
 	# A project that was never opened in Godot has no imported assets yet, and
 	# a headless export of it can miss resources. Import once first.
 	var godot: String = p.get("godot_binary", "")
-	if not folder and not DirAccess.dir_exists_absolute(str(p["path"]).path_join(".godot")):
+	if not folder and not prebuilt and not DirAccess.dir_exists_absolute(str(p["path"]).path_join(".godot")):
 		if _supports_import_flag(_read_required_godot_version(p["path"])):
 			log_step("Importing the project's assets (first export of this project)")
 			var import_code := await run_process(godot, PackedStringArray(["--headless", "--path", p["path"], "--import"]), KnownIssues.GODOT)
@@ -3977,15 +3981,24 @@ func _export_rows(ctx: Dictionary) -> bool:
 			_fail_publish(p, description)
 			return false
 		var out_path := row_dir.path_join(row["file"])
-		log_step("Exporting '%s' as %s → %s" % [row["preset"], out_path.get_file(), " and ".join(goes_to)])
 		var export_started := Time.get_ticks_msec()
+		if prebuilt:
+			if not FileAccess.file_exists(out_path):
+				log_line("--prebuilt: %s is missing; export '%s' into %s first." % [out_path.get_file(), row["preset"], row_dir], COLOR_ERR)
+				_fail_publish(p, description, "prebuilt build missing")
+				return false
+			log_step("Using the prebuilt '%s' %s → %s" % [row["preset"], out_path.get_file(), " and ".join(goes_to)])
+		else:
+			log_step("Exporting '%s' as %s → %s" % [row["preset"], out_path.get_file(), " and ".join(goes_to)])
 
 		# Godot skips the shader baker in a headless export without a word, so a
 		# preset that bakes shaders exports with a window instead.
 		var export_args := PackedStringArray(["--path", p["path"], "--export-release", row["preset"], out_path])
 		if not _preset_bakes_shaders(p["path"], row["preset"]):
 			export_args.insert(0, "--headless")
-		var code := await run_process(godot, export_args, KnownIssues.GODOT)
+		var code := 0
+		if not prebuilt:
+			code = await run_process(godot, export_args, KnownIssues.GODOT)
 		if _publish_cancelled(ctx):
 			return false
 		if code != 0 or not FileAccess.file_exists(out_path):

@@ -89,6 +89,7 @@ Options:
 - `--desc <text>`: the Steam build description. For an app that only goes to itch.io it is the version itch.io shows (the default is the project's `application/config/version`).
 - `--branch <name>`: set the build live on this beta branch after the upload (SteamPipe's `SetLive`). `default` and `public` are refused, see below.
 - `--dry-run`: check, export and start the build, but upload nothing.
+- `--prebuilt`: skip the Godot export and use the builds already at each row's `export_to` path (from `list --json`), for example exported on another machine such as a Steam Deck. They are unpacked, tested and uploaded as usual.
 - `--strict`: stop before uploading when an exported build has script errors or missing files (see **Script check** above), shader errors (see **Starting the exported build** below), or crashed when started.
 - `--smoke-seconds <n>`: how long each exported build runs, headless and then with a renderer (default 15); `--no-smoke` skips that step, the render run and the script check.
 - `--json`: end with a one-line JSON summary as the last line on stdout.

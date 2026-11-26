@@ -56,6 +56,10 @@ Options:
   --desc <text>         Steam build description; for itch.io only, the version.
   --branch <name>       Set the build live on this beta branch (not default/public).
   --dry-run             publish: export and start the build, but upload nothing.
+  --prebuilt            publish: skip the Godot export and use the builds already
+                        in each row's folder (list --json: rows[].export_to),
+                        e.g. exported on another machine. Unpacked, tested and
+                        uploaded as usual.
   --strict              publish: stop before uploading when an exported build
                         has script errors, shader errors or missing files,
                         or crashed.
@@ -146,7 +150,7 @@ func run(window: MainWindow, args: PackedStringArray) -> void:
 
 ## Fills _command and _opts; returns an error message or "".
 func _parse(args: PackedStringArray) -> String:
-	var flags := ["--dry-run", "--strict", "--no-smoke", "--json", "--update", "--no-presets"]
+	var flags := ["--dry-run", "--strict", "--no-smoke", "--json", "--update", "--no-presets", "--prebuilt"]
 	var valued := ["--project", "--stores", "--desc", "--branch", "--smoke-seconds", "--log",
 		"--app", "--name", "--output", "--platforms", "--windows-depot", "--macos-depot",
 		"--linux-depot", "--godot", "--bundle-id"]
@@ -316,11 +320,14 @@ func _app_summary(p: Dictionary) -> Dictionary:
 			row["preset"] = str(d.get("preset", ""))
 			row["platform"] = kind
 			row["executable"] = "index.html" if kind == "web" else str(d.get("output", "")).strip_edges() + w._shown_extension(kind)
+			row["export_to"] = OS.get_user_data_dir().path_join("builds").path_join(str(p.get("uid", ""))).path_join("content").path_join("%d-%s" % [i + 1, kind if not kind.is_empty() else "build"]).path_join(w._export_file_name(kind, str(d.get("output", ""))))
 		rows.append(row)
 	var app := {
 		"name": p["name"],
 		"path": p["path"],
 		"kind": p["kind"],
+		"uid": str(p.get("uid", "")),
+		"build_dir": OS.get_user_data_dir().path_join("builds").path_join(str(p.get("uid", ""))),
 		"godot_binary": p.get("godot_binary", ""),
 		"version": "" if folder else w._read_project_version(p["path"]),
 		"steam": MainWindow._steam_on(p),
@@ -574,6 +581,7 @@ func _publish() -> void:
 		"strict": _opts.get("strict", false),
 		"script_check": mode != "check" and not _opts.get("no-smoke", false),
 		"all_or_nothing": true,
+		"prebuilt": _opts.get("prebuilt", false),
 		# The render run's last frame goes next to this run's log.
 		"frame_dir": _log_path.get_base_dir() if not _log_path.is_empty() else ProjectSettings.globalize_path(LOG_DIR),
 		"frame_prefix": _log_path.get_file().get_basename() if not _log_path.is_empty() else _command,
